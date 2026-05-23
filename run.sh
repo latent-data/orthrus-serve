@@ -34,8 +34,11 @@ if ! docker info 2>/dev/null | grep -q "nvidia"; then
     exit 1
 fi
 
+CONTAINER_NAME=orthrus-serve
+
 COMMON_DOCKER_ARGS=(
     --rm
+    --name "${CONTAINER_NAME}"
     --gpus all
     --ipc=host
     --ulimit memlock=-1
@@ -44,6 +47,10 @@ COMMON_DOCKER_ARGS=(
     -p "${PORT}:${PORT}"
     -e PORT="${PORT}"
 )
+
+# Remove any stopped container with this name left over from a previous run
+# (--rm handles clean exit, but crashes can leave a tombstone)
+docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 
 if [[ "$NO_BUILD" -eq 1 ]]; then
     echo "==> Skipping build; using ${NGC_IMAGE} with mounted source ..."

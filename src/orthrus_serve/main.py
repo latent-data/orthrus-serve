@@ -158,17 +158,39 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
     # Buffered path: tools present (must see full output to parse tool calls),
     # or client did not request streaming.
+    #
+    # If the client requested streaming we also need to keep the connection alive
+    # while generating — diffusion-mode generation can take 60-90s and HTTP
+    # clients time out waiting for the first byte. We do this by returning an
+    # SSE StreamingResponse that ticks keepalive comments while the GPU works,
+    # then emits the actual result chunks when generation completes.
+    if request.stream:
+        return StreamingResponse(
+            _buffered_sse(
+                request_id, t_start, prompt, temperature, top_p, max_tokens, stop
+            ),
+            media_type="text/event-stream",
+        )
+
     try:
         async with asyncio.timeout(300):
             async with _request_semaphore:
                 t_generate_start = time.perf_counter()
                 loop = asyncio.get_event_loop()
-                result = await loop.run_in_executor(
+                gpu_future = loop.run_in_executor(
                     None,
                     lambda: generate(
                         _model, _tokenizer, prompt, temperature, top_p, max_tokens, stop
                     ),
                 )
+                try:
+                    # shield ensures that if this request is cancelled (client disconnect),
+                    # we still wait for the GPU thread to finish before releasing the
+                    # semaphore — preventing a second generate() call overlapping on the GPU.
+                    result = await asyncio.shield(gpu_future)
+                except asyncio.CancelledError:
+                    await gpu_future
+                    raise
                 t_first_token = time.perf_counter() - t_generate_start
     except asyncio.TimeoutError:
         raise HTTPException(status_code=503, detail="Request timed out")
@@ -237,21 +259,102 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         )
     )
 
-    # If the client requested streaming we must return SSE even though we buffered.
-    # Emit the tool calls as properly formatted SSE chunks (matching vLLM's wire format).
-    if request.stream:
-        return StreamingResponse(
-            _sse_tool_call_response(response, tool_calls_out, finish_reason),
-            media_type="text/event-stream",
-        )
-
     return response
 
 
-async def _sse_tool_call_response(response, tool_calls_out, finish_reason):
-    """Wrap a buffered tool-call response as OpenAI-compatible SSE chunks."""
-    created = response.created
-    cid = response.id
+async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tokens, stop):
+    """
+    Streaming response for requests that need buffering (tool calls present).
+
+    Sends SSE keepalive comments while the GPU generates, then emits proper
+    tool-call chunks. This prevents HTTP client read-timeouts on long generations
+    (diffusion mode can take 60-90s with no output).
+    """
+    loop = asyncio.get_event_loop()
+
+    try:
+        async with asyncio.timeout(300):
+            async with _request_semaphore:
+                t_generate_start = time.perf_counter()
+                gpu_future = loop.run_in_executor(
+                    None,
+                    lambda: generate(
+                        _model, _tokenizer, prompt, temperature, top_p, max_tokens, stop
+                    ),
+                )
+                # Tick keepalive comments every 5s while the GPU works.
+                # SSE comment lines (": ...") are ignored by parsers but reset
+                # the client's read timeout.
+                try:
+                    while True:
+                        done, _ = await asyncio.wait(
+                            [asyncio.ensure_future(asyncio.shield(gpu_future))],
+                            timeout=5,
+                        )
+                        if done:
+                            result = await gpu_future
+                            break
+                        yield ": ping\n\n"
+                except asyncio.CancelledError:
+                    await gpu_future
+                    raise
+                t_first_token = time.perf_counter() - t_generate_start
+    except asyncio.TimeoutError:
+        yield "data: {\"error\": \"Request timed out\"}\n\ndata: [DONE]\n\n"
+        return
+
+    t_total = time.perf_counter() - t_start
+    LATENCY_HIST.observe(t_total)
+    TTFT_HIST.observe(t_first_token)
+
+    if DEBUG:
+        logger.debug(json.dumps({"request_id": request_id, "event": "raw_output", "text": result.text}))
+
+    output_text = strip_think_tags(result.text)
+    tool_calls_raw, content = parse_tool_calls(output_text)
+
+    finish_reason = "stop"
+    tool_calls_out = None
+
+    if tool_calls_raw:
+        TOOL_CALL_COUNTER.inc()
+        finish_reason = "tool_calls"
+        tool_calls_out = [
+            ToolCall(
+                id=tc["id"],
+                function=FunctionCall(
+                    name=tc["function"]["name"],
+                    arguments=tc["function"]["arguments"],
+                ),
+            )
+            for tc in tool_calls_raw
+        ]
+        content = content if content else None
+    else:
+        content = output_text
+
+    logger.info(
+        json.dumps(
+            {
+                "request_id": request_id,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "ttft_s": round(t_first_token, 3),
+                "total_s": round(t_total, 3),
+                "tool_calls": bool(tool_calls_raw),
+                "finish_reason": finish_reason,
+                "orthrus_revision": os.environ.get("ORTHRUS_REVISION", "default"),
+            }
+        )
+    )
+
+    async for chunk in _sse_tool_call_response(request_id, tool_calls_out, finish_reason, content):
+        yield chunk
+
+
+async def _sse_tool_call_response(cid, tool_calls_out, finish_reason, content=None):
+    """Emit a buffered result as OpenAI-compatible SSE chunks (vLLM wire format)."""
+    created = int(time.time())
 
     def chunk(delta: dict) -> str:
         payload = {
