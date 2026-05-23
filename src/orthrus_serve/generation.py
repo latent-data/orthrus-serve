@@ -43,8 +43,8 @@ def generate(
     max_tokens: int,
     stop: list[str] | None,
 ) -> GenerationResult:
-    inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    prompt_len = inputs["input_ids"].shape[1]
+    input_ids = tokenizer.encode(prompt, return_tensors="pt").to(model.device)
+    prompt_len = input_ids.shape[1]
 
     do_sample = temperature is not None and temperature > 0.0
 
@@ -72,7 +72,7 @@ def generate(
     logger.debug("generate_kwargs keys=%s use_diffusion=%s", list(generate_kwargs.keys()), use_diffusion)
 
     with torch.inference_mode():
-        output_ids = model.generate(input_ids=inputs["input_ids"], **generate_kwargs)
+        output_ids = model.generate(input_ids=input_ids, **generate_kwargs)
 
     # Slice off the prompt tokens; decode only the completion
     new_ids = output_ids[0][prompt_len:]
