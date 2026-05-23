@@ -33,6 +33,8 @@ from .tool_parse import parse_tool_calls, strip_think_tags
 
 DEBUG = os.environ.get("ORTHRUS_DEBUG", "0") == "1"
 BASE_MODEL = os.environ.get("ORTHRUS_BASE_MODEL", "0") == "1"
+_thinking_env = os.environ.get("ORTHRUS_ENABLE_THINKING")
+ENABLE_THINKING: bool | None = None if _thinking_env is None else (_thinking_env == "true")
 SERVED_MODEL_ID = "qwen3-8b" if BASE_MODEL else "orthrus-qwen3-8b"
 
 logging.basicConfig(
@@ -123,7 +125,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     max_tokens = request.max_tokens if request.max_tokens is not None else 2048
     temperature = request.temperature
     top_p = request.top_p
-    chat_template_kwargs = request.chat_template_kwargs or {}
+    _thinking_default = {} if ENABLE_THINKING is None else {"enable_thinking": ENABLE_THINKING}
+    chat_template_kwargs = {**_thinking_default, **(request.chat_template_kwargs or {})}
 
     # Build messages as plain dicts for apply_chat_template
     messages = [m.model_dump(exclude_none=True) for m in request.messages]
