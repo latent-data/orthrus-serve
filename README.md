@@ -17,8 +17,13 @@ Orthrus is a diffusion-mode language model. This server wraps it in an OpenAI-co
 This builds the Docker image and starts the container. The server exposes port 8080 by default.
 
 ```bash
-PORT=9090 ./run.sh          # use a different port
-./run.sh --no-build         # skip docker build, mount source directly (faster iteration)
+PORT=9090 ./run.sh              # use a different port
+./run.sh --no-build             # skip docker build, mount source directly (faster iteration)
+./run.sh --no-diffusion         # disable diffusion mode (autoregressive fallback)
+./run.sh --debug                # enable verbose debug logging
+./run.sh --with-base-model      # load Qwen3-8B instead of Orthrus
+./run.sh --enable-thinking      # force thinking tokens on (model default is off)
+./run.sh --disable-thinking     # force thinking tokens off
 ```
 
 Environment variables you can override (defaults are baked into the Dockerfile):
@@ -27,7 +32,10 @@ Environment variables you can override (defaults are baked into the Dockerfile):
 |---|---|---|
 | `PORT` | `8080` | Listening port |
 | `ORTHRUS_REVISION` | pinned SHA | HF revision for Orthrus model |
-| `QWEN_REVISION` | pinned SHA | HF revision for Qwen3-8B (chat template source) |
+| `ORTHRUS_DIFFUSION` | `1` | Set to `0` to disable diffusion mode |
+| `ORTHRUS_DEBUG` | `0` | Set to `1` for verbose JSON debug logs |
+| `ORTHRUS_BASE_MODEL` | `0` | Set to `1` to load Qwen3-8B instead of Orthrus |
+| `ORTHRUS_ENABLE_THINKING` | unset | Set to `true` or `false` to override the model default |
 
 ## Endpoints
 
@@ -42,7 +50,7 @@ Environment variables you can override (defaults are baked into the Dockerfile):
 
 Orthrus emits tool calls in Qwen3 format (`<tool_call>...</tool_call>` blocks). This server parses them and converts to the OpenAI `tool_calls` array format, with `function.arguments` as a JSON-encoded string per the OpenAI spec.
 
-If `tools` are present in the request, streaming is disabled for that request (tool calls are buffered until generation completes). Plain chat requests support streaming normally.
+If `tools` are present in the request, the full generation is buffered before tool calls are parsed and returned. The SSE stream is still opened immediately and keepalive comments (`": ping"`) are emitted every 5 s so the client's read-timeout doesn't fire during long generations. Plain chat requests (no tools) stream tokens as they are produced.
 
 ## Benchmarking with tool-eval-bench
 
@@ -72,10 +80,6 @@ bash scripts/smoke_test.sh
 pip install -e ".[dev]"
 pytest
 ```
-
-## Chat template note
-
-The Orthrus tokenizer does not include `chat_template` in its `tokenizer_config.json`. At startup, this server inherits the template from `Qwen/Qwen3-8B` and logs a warning. If Orthrus adds the template upstream, the warning disappears and the workaround can be removed.
 
 ## Relation to llama.cpp parity endpoint
 
