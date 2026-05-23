@@ -42,17 +42,6 @@ def load_model_and_tokenizer() -> tuple[AutoModelForCausalLM, AutoTokenizer]:
         trust_remote_code=True,
     )
 
-    # Orthrus tokenizer_config.json is missing chat_template; inherit from Qwen3-8B.
-    # If Orthrus adds it upstream this warning disappears and the workaround can be dropped.
-    if tokenizer.chat_template is None:
-        logger.warning(
-            "Orthrus tokenizer missing chat_template; inheriting from %s (revision=%s)",
-            QWEN_MODEL_ID,
-            qwen_revision,
-        )
-        base_tok = AutoTokenizer.from_pretrained(QWEN_MODEL_ID, revision=qwen_revision)
-        tokenizer.chat_template = base_tok.chat_template
-
     logger.info("Loading Orthrus model (revision=%s)", orthrus_revision)
     model = AutoModelForCausalLM.from_pretrained(
         ORTHRUS_MODEL_ID,
