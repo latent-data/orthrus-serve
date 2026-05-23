@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "orthrus-serve"
+version = "0.1.0"
+description = "OpenAI-compatible serving endpoint for chiennv/Orthrus-Qwen3-8B"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+    { name = "Simon Epstein", email = "simon@latentdata.co.uk" }
+]
+
+license = "Apache-2.0"
+
+# torch is NOT listed here: the NGC container ships a custom sm_121 build.
+# accelerate and transformers are installed with --no-deps to avoid clobbering it.
+dependencies = [
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.7.0",
+    "prometheus-client>=0.20.0",
+    # transformers==5.8.1 requires >=1.5.0; NGC container ships 1.2.3
+    "huggingface-hub>=1.5.0,<2.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "httpx>=0.27",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
