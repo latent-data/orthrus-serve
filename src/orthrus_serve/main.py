@@ -264,45 +264,45 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
 
 async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tokens, stop):
     """
-    Streaming response for requests that need buffering (tool calls present).
+    Streaming response for tool-call requests.
 
-    Sends SSE keepalive comments while the GPU generates, then emits proper
-    tool-call chunks. This prevents HTTP client read-timeouts on long generations
-    (diffusion mode can take 60-90s with no output).
+    Runs generation in an executor thread while emitting SSE keepalive comments
+    every 5 s so the client's read-timeout doesn't fire during long diffusion-mode
+    generations. The full output is buffered, parsed for tool calls, then emitted
+    as structured SSE chunks.
     """
     loop = asyncio.get_event_loop()
+    created = int(time.time())
 
-    try:
-        async with asyncio.timeout(300):
-            async with _request_semaphore:
-                t_generate_start = time.perf_counter()
-                gpu_future = loop.run_in_executor(
-                    None,
-                    lambda: generate(
-                        _model, _tokenizer, prompt, temperature, top_p, max_tokens, stop
-                    ),
-                )
-                # Tick keepalive comments every 5s while the GPU works.
-                # SSE comment lines (": ...") are ignored by parsers but reset
-                # the client's read timeout.
+    def _make_chunk(delta: dict) -> str:
+        return f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': SERVED_MODEL_ID, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]})}\n\n"
+
+    # Role chunk sent immediately so the client knows the stream is live.
+    yield _make_chunk({"role": "assistant", "content": None})
+
+    t_generate_start = time.perf_counter()
+
+    async with _request_semaphore:
+        gpu_future = loop.run_in_executor(
+            None,
+            lambda: generate(
+                _model, _tokenizer, prompt, temperature, top_p, max_tokens, stop
+            ),
+        )
+        try:
+            while True:
                 try:
-                    while True:
-                        done, _ = await asyncio.wait(
-                            [asyncio.ensure_future(asyncio.shield(gpu_future))],
-                            timeout=5,
-                        )
-                        if done:
-                            result = await gpu_future
-                            break
-                        yield ": ping\n\n"
-                except asyncio.CancelledError:
-                    await gpu_future
-                    raise
-                t_first_token = time.perf_counter() - t_generate_start
-    except asyncio.TimeoutError:
-        yield "data: {\"error\": \"Request timed out\"}\n\ndata: [DONE]\n\n"
-        return
+                    result = await asyncio.wait_for(asyncio.shield(gpu_future), timeout=5.0)
+                    break
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        except asyncio.CancelledError:
+            # Client disconnected — drain the GPU before releasing the semaphore
+            # so no second generate() call overlaps on the GPU.
+            await gpu_future
+            raise
 
+    t_first_token = time.perf_counter() - t_generate_start
     t_total = time.perf_counter() - t_start
     LATENCY_HIST.observe(t_total)
     TTFT_HIST.observe(t_first_token)
@@ -329,9 +329,6 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
             )
             for tc in tool_calls_raw
         ]
-        content = content if content else None
-    else:
-        content = output_text
 
     logger.info(
         json.dumps(
@@ -348,55 +345,20 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
         )
     )
 
-    async for chunk in _sse_tool_call_response(request_id, tool_calls_out, finish_reason, content):
-        yield chunk
-
-
-async def _sse_tool_call_response(cid, tool_calls_out, finish_reason, content=None):
-    """Emit a buffered result as OpenAI-compatible SSE chunks (vLLM wire format)."""
-    created = int(time.time())
-
-    def chunk(delta: dict) -> str:
-        payload = {
-            "id": cid,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": SERVED_MODEL_ID,
-            "choices": [{"index": 0, "delta": delta, "finish_reason": None}],
-        }
-        return f"data: {json.dumps(payload)}\n\n"
-
-    # Role chunk
-    yield chunk({"role": "assistant", "content": None})
-
     if tool_calls_out:
         for i, tc in enumerate(tool_calls_out):
-            # Name chunk (includes id and type on first appearance)
-            yield chunk({
-                "tool_calls": [{
-                    "index": i,
-                    "id": tc.id,
-                    "type": "function",
-                    "function": {"name": tc.function.name, "arguments": ""},
-                }]
+            yield _make_chunk({
+                "tool_calls": [{"index": i, "id": tc.id, "type": "function",
+                                "function": {"name": tc.function.name, "arguments": ""}}]
             })
-            # Arguments chunk
-            yield chunk({
-                "tool_calls": [{
-                    "index": i,
-                    "function": {"arguments": tc.function.arguments},
-                }]
+            yield _make_chunk({
+                "tool_calls": [{"index": i, "function": {"arguments": tc.function.arguments}}]
             })
+    else:
+        if content:
+            yield _make_chunk({"content": content})
 
-    # Final chunk with finish_reason
-    final = {
-        "id": cid,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": SERVED_MODEL_ID,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
-    }
-    yield f"data: {json.dumps(final)}\n\n"
+    yield f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': SERVED_MODEL_ID, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]})}\n\n"
     yield "data: [DONE]\n\n"
 
 

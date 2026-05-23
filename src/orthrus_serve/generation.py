@@ -69,8 +69,10 @@ def generate(
             [StringStoppingCriteria(stop, tokenizer, prompt_len)]
         )
 
+    logger.debug("generate_kwargs keys=%s use_diffusion=%s", list(generate_kwargs.keys()), use_diffusion)
+
     with torch.inference_mode():
-        output_ids = model.generate(**inputs, **generate_kwargs)
+        output_ids = model.generate(input_ids=inputs["input_ids"], **generate_kwargs)
 
     # Slice off the prompt tokens; decode only the completion
     new_ids = output_ids[0][prompt_len:]
