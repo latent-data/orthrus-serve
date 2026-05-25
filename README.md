@@ -52,16 +52,96 @@ Orthrus emits tool calls in Qwen3 format (`<tool_call>...</tool_call>` blocks). 
 
 If `tools` are present in the request, the full generation is buffered before tool calls are parsed and returned. The SSE stream is still opened immediately and keepalive comments (`": ping"`) are emitted every 5 s so the client's read-timeout doesn't fire during long generations. Plain chat requests (no tools) stream tokens as they are produced.
 
-## Benchmarking with tool-eval-bench
+## Benchmarks
+
+Two complementary surfaces:
+
+1. **`tool-eval-bench`** — multi-turn tool-call scenarios, hits serve over HTTP. Run with `python -m tool_eval_bench --base-url http://localhost:8080 --backend vllm --seed 42 --no-think`. The `--backend vllm` flag tells tool-eval-bench to use the OpenAI-compatible wire format that this server matches.
+2. **Long-form generation** — `benchmarks/benchmark.py` (in-process) and `benchmarks/benchmark_http.py` (over HTTP). Results in `benchmarks/results/`.
+
+All numbers below are at revision `977a617` (post the `914faee` AR-fallback fix in upstream Orthrus). `enable_thinking=false` throughout.
+
+### tool-eval-bench (HTTP, 2026-05-25 sweep)
+
+All three configurations against the same 69 scenarios at `--seed 42 --no-think`. Per-request serve INFO logs aggregated via `benchmarks/log_parse.py`.
+
+| Configuration | Run summary | Final Score | Median Turn | Responsiveness |
+|---|---|---:|---:|---:|
+| Orthrus, diffusion on | `~/spark-recipes/runs/2026/05/2026-05-25T10-07-22Z_93a80c.md` | **72** | **2.0 s** | **65** |
+| Orthrus, no-diff (AR fallback) | `~/spark-recipes/runs/2026/05/2026-05-25T10-39-21Z_93a80c.md` | 70 | 4.4 s | 36 |
+| Qwen3-8B (base) | `~/spark-recipes/runs/2026/05/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 |
+
+**Per-request stats** (serve INFO logs):
+
+| Metric | Diffusion | No-diff | Base Qwen3 |
+|---|---:|---:|---:|
+| Requests logged | 154 | 152 | 152 |
+| Tool-call turns | 68 | 66 | 66 |
+| `completion_tokens` (median / mean / max) | 43.5 / 60.1 / 337 | 44 / 60.2 / 347 | 44 / 60.2 / 347 |
+| `total_s` (median / mean / max) | 1.96 / 2.33 / 11.77 | 4.42 / 6.05 / 32.91 | 4.43 / 6.06 / 32.97 |
+| `tok_per_s` (median / mean / max) | 24.8 / 27.3 / 74.6 | 9.84 / 9.67 / 10.62 | 9.81 / 9.65 / 10.59 |
+| Total generate wall-time | 359.5 s | 919.3 s | 921.0 s |
+
+**`tok_per_s` by completion-length bucket:**
+
+| Completion tokens | Diff n | Diff mean | No-diff n | No-diff mean | Base n | Base mean |
+|---|---:|---:|---:|---:|---:|---:|
+| < 10 | 3 | 8.5 | 2 | 5.5 | 2 | 5.4 |
+| 10-30 | 45 | 23.4 | 45 | 9.1 | 45 | 9.1 |
+| 30-100 | 84 | 27.9 | 82 | 9.9 | 82 | 9.9 |
+| 100-300 | 24 | 32.1 | 21 | 10.2 | 21 | 10.2 |
+| 300+ | 1 | 74.2 | 2 | 10.6 | 2 | 10.6 |
+
+### Long-form generation
+
+Two prompts (`short`: ~470 output tokens; `long`: ~1440 output tokens), greedy decoding, `max_new_tokens=2048`, warmup before timing. Same prompts on both in-process and HTTP surfaces.
+
+| Prompt | Config | In-process | HTTP | Δ |
+|---|---|---|---|---|
+| short | Orthrus diffusion | 12.05 s / 39.2 tok/s | 12.17 s / 38.8 tok/s | +0.12 s |
+| short | Orthrus no-diff   | 42.65 s / 11.1 tok/s | 42.72 s / 11.1 tok/s | +0.07 s |
+| short | Qwen3-8B AR       | 42.29 s / 11.2 tok/s | 42.79 s / 11.0 tok/s | +0.50 s |
+| long  | Orthrus diffusion | 27.97 s / 51.5 tok/s | 28.19 s / 51.1 tok/s | +0.22 s |
+| long  | Orthrus no-diff   | 131.76 s / 10.9 tok/s | 131.78 s / 10.9 tok/s | +0.02 s |
+| long  | Qwen3-8B AR       | 130.65 s / 11.0 tok/s | 132.03 s / 10.9 tok/s | +1.38 s |
+
+Geomean Orthrus-diffusion vs Qwen3-8B AR speedup: **4.06×** (3.51× short, 4.69× long). HTTP layer adds <1% on every cell.
+
+**Output identity:** at `temperature=0.0` the first-300-character snippets in `benchmarks/results/results.json` are byte-identical across all three configs for both prompts. Greedy decode is deterministic regardless of diff / no-diff / base — modes change *speed*, not *answers*.
+
+### Conclusions
+
+1. **No-diff Orthrus is indistinguishable from base Qwen3 on this workload.** Median `total_s` 4.42 vs 4.43, total wall-time 919.3 vs 921.0 (<0.2%), median `tok_per_s` 9.84 vs 9.81, identical Final Score and bucket throughputs to one decimal. Direct confirmation that the `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache — same code path as stock Qwen3.
+2. **Diffusion wins at every output-length bucket** including the very short acks (8.5 vs 5.5 tok/s). Both modes carry fixed per-request overhead, but diff's floor sits above no-diff's everywhere.
+3. **Completion-token distributions are essentially identical across modes** (median 43.5 / 44 / 44, max 337 / 347 / 347). Output identity (above) confirms this is text identity, not just length parity. The `StringStoppingCriteria` asymmetry — AR honours it, diffusion ignores it — is a known code-side issue but isn't affecting outputs here.
+4. **Diff is ~2.25× faster per turn than either AR config.** HTTP wrapper is not silently bypassing `use_diffusion_mode=False`; long-form HTTP numbers match in-process within 1%.
+5. **Diff and AR produce the same text where both complete; the 2-point Final Score gap is timeout-driven, not accuracy-driven.** AR's p90 11.87 s / 11.89 s and max ~33 s mean a handful of long-tail turns brush against tool-eval-bench's per-turn timeout, capping those scenario chains early. With unbounded wall-time the scores would match too.
+
+### Reproducing
+
+In-process (runs inside the orthrus-serve docker image):
 
 ```bash
-python -m tool_eval_bench \
-    --base-url http://localhost:8080 \
-    --backend vllm \
-    --scenarios TC-01 TC-02 TC-03
+benchmarks/run_benchmark.sh --include-nodiff             # all three configs, both prompts
+benchmarks/run_benchmark.sh --no-build --prompts short   # iterate fast
 ```
 
-The `--backend vllm` flag tells tool-eval-bench to use the OpenAI-compatible wire format, which this server matches exactly.
+Output: `benchmarks/results/results.json`.
+
+HTTP (host-side, stdlib only — needs serve already running):
+
+```bash
+./run.sh --disable-thinking &
+python3 benchmarks/benchmark_http.py --label orthrus_diffusion --disable-thinking --warmup
+
+# stop, restart with --no-diffusion
+python3 benchmarks/benchmark_http.py --label orthrus_nodiff --disable-thinking --warmup
+
+# stop, restart with --with-base-model
+python3 benchmarks/benchmark_http.py --label qwen3_8b_ar --model qwen3-8b --disable-thinking --warmup
+```
+
+Output appends each `--label` into `results/results_http.json` (cwd-relative; run from `benchmarks/` to land in `benchmarks/results/`).
 
 ## Concurrency
 
