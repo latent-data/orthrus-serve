@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Run pytest inside the orthrus-serve container so torch / transformers /
-# flash_attn match what the server uses. Mirrors tests/run_benchmark.sh.
+# flash_attn match what the server uses. Mirrors benchmarks/run_benchmark.sh.
 #
 # Usage:
 #   tests/run_tests.sh                  # build image, run all tests

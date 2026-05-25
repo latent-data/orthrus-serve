@@ -3,7 +3,7 @@ Endpoint shape tests with a stubbed generate() and tokenizer.
 
 Covers the FastAPI wrapper paths (request handling, post-processing, OpenAI
 response shape, SSE chunk format). The model itself is not exercised —
-tests/benchmark.py covers the model side.
+benchmarks/benchmark.py covers the model side.
 
 Goal: guard the refactor in todo.md (collapse the two post-generate paths,
 delete streaming.py, centralise env config) by pinning the response contract.

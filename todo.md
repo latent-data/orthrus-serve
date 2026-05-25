@@ -20,4 +20,4 @@ Empty — todo.md cleanup pass is complete.
 ## What's still deliberately left alone
 
 - `model.py`, `generation.py`, `tool_parse.py`, `openai_schemas.py` — already small and focused.
-- Logging format — JSON-in-JSON envelope is awkward but `tests/utils/log_parse.py` handles it and downstream consumers may depend on it.
+- Logging format — JSON-in-JSON envelope is awkward but `benchmarks/log_parse.py` handles it and downstream consumers may depend on it.

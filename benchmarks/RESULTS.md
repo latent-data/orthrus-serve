@@ -3,7 +3,7 @@
 Two complementary benchmark surfaces:
 
 1. **`tool-eval-bench`** — multi-turn tool-call scenarios, hits serve over HTTP. Numbers below sit in `~/spark-recipes/runs/`.
-2. **Long-form generation** — `tests/benchmark.py` (in-process) and `tests/benchmark_http.py` (over HTTP). Numbers in `tests/results/`.
+2. **Long-form generation** — `benchmarks/benchmark.py` (in-process) and `benchmarks/benchmark_http.py` (over HTTP). Numbers in `benchmarks/results/`.
 
 All Orthrus runs use revision `977a617772e91c966a8cd9b551f4151f9824b6fa` (post the `914faee` AR-fallback fix). All runs pass `enable_thinking=false`.
 
@@ -11,7 +11,7 @@ All Orthrus runs use revision `977a617772e91c966a8cd9b551f4151f9824b6fa` (post t
 
 ## tool-eval-bench (HTTP, multi-turn tool-call workload, 2026-05-25 sweep)
 
-All three configurations run against the same 69 scenarios at `--seed 42 --no-think`. Per-request serve INFO logs aggregated via `tests/utils/log_parse.py`.
+All three configurations run against the same 69 scenarios at `--seed 42 --no-think`. Per-request serve INFO logs aggregated via `benchmarks/log_parse.py`.
 
 | Configuration | Summary | Final Score | Median Turn | Responsiveness |
 |---|---|---:|---:|---:|
@@ -50,7 +50,7 @@ All three configurations run against the same 69 scenarios at `--seed 42 --no-th
 
 ---
 
-## Long-form generation (`tests/benchmark.py` + `tests/benchmark_http.py`)
+## Long-form generation (`benchmarks/benchmark.py` + `benchmarks/benchmark_http.py`)
 
 Two prompts (`short`: ~470 output tokens; `long`: ~1440 output tokens), greedy decoding, `max_new_tokens=2048`, warmup before timing. Same prompts on both surfaces.
 
@@ -80,23 +80,23 @@ The HTTP numbers track in-process to within ~1% on every cell. So:
 In-process (runs inside the orthrus-serve docker image):
 
 ```bash
-tests/run_benchmark.sh --include-nodiff             # all three configs, both prompts
-tests/run_benchmark.sh --no-build --prompts short   # iterate fast
+benchmarks/run_benchmark.sh --include-nodiff             # all three configs, both prompts
+benchmarks/run_benchmark.sh --no-build --prompts short   # iterate fast
 ```
 
-Output: `tests/results/results.json`.
+Output: `benchmarks/results/results.json`.
 
 HTTP (host-side, stdlib only — needs serve already running):
 
 ```bash
 ./run.sh --disable-thinking &
-python3 tests/benchmark_http.py --label orthrus_diffusion --disable-thinking --warmup
+python3 benchmarks/benchmark_http.py --label orthrus_diffusion --disable-thinking --warmup
 
 # stop, restart with --no-diffusion
-python3 tests/benchmark_http.py --label orthrus_nodiff --disable-thinking --warmup
+python3 benchmarks/benchmark_http.py --label orthrus_nodiff --disable-thinking --warmup
 
 # stop, restart with --with-base-model
-python3 tests/benchmark_http.py --label qwen3_8b_ar --model qwen3-8b --disable-thinking --warmup
+python3 benchmarks/benchmark_http.py --label qwen3_8b_ar --model qwen3-8b --disable-thinking --warmup
 ```
 
-Output: appends each `--label` into `results/results_http.json` (cwd-relative; run from `tests/` to land in `tests/results/`).
+Output: appends each `--label` into `results/results_http.json` (cwd-relative; run from `tests/` to land in `benchmarks/results/`).

@@ -8,9 +8,9 @@ Each request log line looks like:
                 "finish_reason":"...","orthrus_revision":"..."}}
 
 Usage:
-    python tests/utils/log_parse.py /tmp/serve.log
-    python tests/utils/log_parse.py /tmp/serve.log --since "2026-05-25 10:07"
-    cat /tmp/serve.log | python tests/utils/log_parse.py -
+    python benchmarks/log_parse.py /tmp/serve.log
+    python benchmarks/log_parse.py /tmp/serve.log --since "2026-05-25 10:07"
+    cat /tmp/serve.log | python benchmarks/log_parse.py -
 """
 from __future__ import annotations
 

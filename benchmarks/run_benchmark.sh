@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 #
-# Run tests/benchmark.py inside the orthrus-serve container so it sees the same
-# torch / transformers / flash_attn build as the server.
+# Run benchmarks/benchmark.py inside the orthrus-serve container so it sees the
+# same torch / transformers / flash_attn build as the server.
 #
 # Usage:
-#   tests/run_benchmark.sh                 # build image, run default prompts
-#   tests/run_benchmark.sh --no-build      # skip build, mount source into NGC image
-#   tests/run_benchmark.sh --include-nodiff --prompts long --runs 3
+#   benchmarks/run_benchmark.sh                 # build image, run default prompts
+#   benchmarks/run_benchmark.sh --no-build      # skip build, mount source into NGC image
+#   benchmarks/run_benchmark.sh --include-nodiff --prompts long --runs 3
 #
 # Anything other than --no-build is forwarded to benchmark.py.
 set -euo pipefail
@@ -46,7 +46,7 @@ COMMON_DOCKER_ARGS=(
     --ulimit stack=67108864
     -v "${HOME}/.cache/huggingface:/root/.cache/huggingface"
     -v "${PROJECT_DIR}:/workspace"
-    -w /workspace/tests
+    -w /workspace/benchmarks
 )
 
 if [[ "$NO_BUILD" -eq 1 ]]; then

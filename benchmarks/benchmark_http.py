@@ -2,19 +2,19 @@
 HTTP benchmark for orthrus-serve.
 
 Hits POST /v1/chat/completions on a running server with the same prompts as
-tests/benchmark.py (in-process). Each server instance serves one config
+benchmarks/benchmark.py (in-process). Each server instance serves one config
 (diff / no-diff / base), so run this script once per config with a unique
 --label; results accumulate into a single JSON file for side-by-side comparison.
 
 Usage:
     # serve started with default (Orthrus, diffusion on)
-    python tests/benchmark_http.py --label orthrus_diffusion
+    python benchmarks/benchmark_http.py --label orthrus_diffusion
 
     # restart serve with --no-diffusion, then:
-    python tests/benchmark_http.py --label orthrus_nodiff
+    python benchmarks/benchmark_http.py --label orthrus_nodiff
 
     # restart serve with --with-base-model, then:
-    python tests/benchmark_http.py --label qwen3_8b_ar --model qwen3-8b
+    python benchmarks/benchmark_http.py --label qwen3_8b_ar --model qwen3-8b
 
 Stdlib only — no extra deps needed on the host.
 """
@@ -26,7 +26,7 @@ import sys
 import time
 import urllib.request
 
-# Kept in sync with tests/benchmark.py — duplicated here so this script is
+# Kept in sync with benchmarks/benchmark.py — duplicated here so this script is
 # importable from the host without torch/transformers in the environment.
 PROMPTS = {
     "short": (
