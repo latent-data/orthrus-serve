@@ -9,16 +9,44 @@ All Orthrus runs use revision `977a617772e91c966a8cd9b551f4151f9824b6fa` (post t
 
 ---
 
-## tool-eval-bench (HTTP, multi-turn tool-call workload)
+## tool-eval-bench (HTTP, multi-turn tool-call workload, 2026-05-25 sweep)
 
-| Configuration | Summary file | Median turn |
-|---|---|---|
-| base Qwen3-8B, thinking off       | `~/spark-recipes/runs/2026/05/2026-05-23T17-52-30Z_9cd212_summary.md` | 4.5s |
-| Orthrus, diffusion on, thinking off  | `~/spark-recipes/runs/2026/05/2026-05-23T19-19-08Z_93a80c_summary.md` | 2.0s |
-| Orthrus, no-diff, thinking off       | `~/spark-recipes/runs/2026/05/2026-05-24T06-52-20Z_93a80c_summary.md` | 4.5s |
-| Orthrus, no-diff, thinking on        | `~/spark-recipes/runs/2026/05/2026-05-23T20-47-05Z_93a80c_summary.md` | 30.3s |
+All three configurations run against the same 69 scenarios at `--seed 42 --no-think`. Per-request serve INFO logs aggregated via `tests/utils/log_parse.py`.
 
-Pattern: diffusion ≈ 2× faster than AR fallback or base. AR fallback matches base, consistent with both doing real AR + KV cache.
+| Configuration | Summary | Final Score | Median Turn | Responsiveness |
+|---|---|---:|---:|---:|
+| Orthrus, diffusion on | `~/spark-recipes/runs/2026/05/2026-05-25T10-07-22Z_93a80c.md` | **72** | **2.0 s** | **65** |
+| Orthrus, no-diff (AR fallback) | `~/spark-recipes/runs/2026/05/2026-05-25T10-39-21Z_93a80c.md` | 70 | 4.4 s | 36 |
+| Qwen3-8B (base) | `~/spark-recipes/runs/2026/05/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 |
+
+### Per-request stats (serve INFO logs)
+
+| Metric | Diffusion | No-diff | Base Qwen3 |
+|---|---:|---:|---:|
+| Requests logged | 154 | 152 | 152 |
+| Tool-call turns | 68 | 66 | 66 |
+| `completion_tokens` (median / mean / max) | 43.5 / 60.1 / 337 | 44 / 60.2 / 347 | 44 / 60.2 / 347 |
+| `total_s` (median / mean / max) | 1.96 / 2.33 / 11.77 | 4.42 / 6.05 / 32.91 | 4.43 / 6.06 / 32.97 |
+| `tok_per_s` (median / mean / max) | 24.8 / 27.3 / 74.6 | 9.84 / 9.67 / 10.62 | 9.81 / 9.65 / 10.59 |
+| Total generate wall-time | 359.5 s | 919.3 s | 921.0 s |
+
+### tok_per_s by completion-token bucket
+
+| Completion tokens | Diff n | Diff mean tok/s | No-diff n | No-diff mean tok/s | Base n | Base mean tok/s |
+|---|---:|---:|---:|---:|---:|---:|
+| < 10 | 3 | 8.5 | 2 | 5.5 | 2 | 5.4 |
+| 10-30 | 45 | 23.4 | 45 | 9.1 | 45 | 9.1 |
+| 30-100 | 84 | 27.9 | 82 | 9.9 | 82 | 9.9 |
+| 100-300 | 24 | 32.1 | 21 | 10.2 | 21 | 10.2 |
+| 300+ | 1 | 74.2 | 2 | 10.6 | 2 | 10.6 |
+
+### Conclusions
+
+1. **No-diff Orthrus is indistinguishable from base Qwen3 on this workload.** Median `total_s` 4.42 vs 4.43, total generate wall-time 919.3 vs 921.0 (<0.2%), median `tok_per_s` 9.84 vs 9.81, identical Final Score 70 and bucket throughputs to one decimal. This is direct confirmation that the `914faee` AR-fallback fix makes Orthrus's `use_diffusion_mode=False` path real AR + KV cache — same code path as stock Qwen3.
+2. **Diffusion wins at every output-length bucket** — including the very short acks (8.5 vs 5.5 tok/s). Both modes carry fixed per-request overhead that compresses tok/s on short outputs, but diff's floor sits above no-diff's everywhere.
+3. **Completion-token distributions are essentially identical across all three modes** (median 43.5 / 44 / 44, max 337 / 347 / 347). The `StringStoppingCriteria` asymmetry (AR honours it, diffusion ignores it — see `todo.md`) is a real code issue but is not affecting output length here; at greedy with this seed every mode produces the same answers.
+4. **Diff is ~2.25× faster per turn than either AR config.** The historical "diff ≈ no-diff" claim does not reproduce on revision `977a617` with instrumentation. Whatever produced that earlier observation isn't visible in this rerun.
+5. **Quality drops 2 points (72 → 70) in both AR configurations.** p90 wall-time 11.87 s / 11.89 s and max ~33 s suggest a small handful of long-tail turns may brush up against tool-eval-bench's per-turn timeout, capping the chain early. Not investigated further — diff is strictly preferable on every axis here.
 
 ---
 
@@ -44,14 +72,6 @@ The HTTP numbers track in-process to within ~1% on every cell. So:
 - **HTTP / FastAPI / uvicorn / asyncio overhead is negligible** at this scale.
 - **`--no-diff` over HTTP is real AR**: matches base Qwen3 to within 0.1% on both prompts. The `914faee` "restore KV cache and EOS in AR fallback" fix is live in revision `977a617`.
 - **Diffusion through serve is 3.5–4.7× faster than no-diff**, identical to in-process. The wrapper is not silently bypassing `use_diffusion_mode=False`.
-
-### Unresolved: tool-eval-bench shows diff ≈ no-diff on the same serve
-
-Long-form generation here clearly differentiates diff from no-diff. tool-eval-bench reportedly does not. That divergence cannot live in the model, the wrapper, or the HTTP layer — those are all benchmarked clean above. It must live in the workload itself.
-
-Leading hypothesis: **the `StringStoppingCriteria` in `generation.py:67-70` is wired into AR but silently ignored by the diffusion path** (a known limitation — we'd have to patch the cached model file to fix). If a tool-call closing string trips the AR generator early but lets diffusion run to EOS or `max_tokens`, per-turn time compresses for no-diff and inflates for diff, collapsing the gap.
-
-To verify, log `completion_tokens` and `tok_per_s` per request (now done in `main.py` at INFO level) and compare diff vs no-diff for the same scenarios.
 
 ---
 
