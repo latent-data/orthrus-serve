@@ -57,8 +57,8 @@ def generate(
         "max_new_tokens": max_tokens,
         "do_sample": do_sample,
     }
-    if use_diffusion:
-        generate_kwargs["use_diffusion_mode"] = True
+    if not use_base_model:
+        generate_kwargs["use_diffusion_mode"] = use_diffusion
     if do_sample:
         generate_kwargs["temperature"] = temperature
         if top_p is not None:
@@ -69,7 +69,8 @@ def generate(
             [StringStoppingCriteria(stop, tokenizer, prompt_len)]
         )
 
-    logger.debug("generate_kwargs keys=%s use_diffusion=%s", list(generate_kwargs.keys()), use_diffusion)
+    loggable = {k: v for k, v in generate_kwargs.items() if k != "stopping_criteria"}
+    logger.debug("generate_kwargs %s", loggable)
 
     with torch.inference_mode():
         output_ids = model.generate(input_ids=input_ids, **generate_kwargs)

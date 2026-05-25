@@ -70,7 +70,10 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     _model, _tokenizer = await loop.run_in_executor(None, load_model_and_tokenizer)
     _ready = True
-    logger.info('"Model ready"')
+    _diffusion_on = not BASE_MODEL and os.environ.get("ORTHRUS_DIFFUSION", "1") != "0"
+    logger.info(
+        json.dumps({"event": "model_ready", "diffusion": _diffusion_on, "thinking": ENABLE_THINKING})
+    )
     yield
 
 
@@ -247,6 +250,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     if DEBUG:
         logger.debug(json.dumps({"request_id": request_id, "event": "response", "body": response.model_dump()}))
 
+    tok_per_s = round(result.completion_tokens / t_first_token, 2) if t_first_token > 0 else 0.0
     logger.info(
         json.dumps(
             {
@@ -255,6 +259,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
                 "completion_tokens": result.completion_tokens,
                 "ttft_s": round(t_first_token, 3),
                 "total_s": round(t_total, 3),
+                "tok_per_s": tok_per_s,
                 "tool_calls": bool(tool_calls_raw),
                 "finish_reason": finish_reason,
                 "orthrus_revision": os.environ.get("ORTHRUS_REVISION", "default"),
@@ -333,6 +338,7 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
             for tc in tool_calls_raw
         ]
 
+    tok_per_s = round(result.completion_tokens / t_first_token, 2) if t_first_token > 0 else 0.0
     logger.info(
         json.dumps(
             {
@@ -341,6 +347,7 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
                 "completion_tokens": result.completion_tokens,
                 "ttft_s": round(t_first_token, 3),
                 "total_s": round(t_total, 3),
+                "tok_per_s": tok_per_s,
                 "tool_calls": bool(tool_calls_raw),
                 "finish_reason": finish_reason,
                 "orthrus_revision": os.environ.get("ORTHRUS_REVISION", "default"),
