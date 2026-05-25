@@ -28,7 +28,6 @@ from .openai_schemas import (
     FunctionCall,
     Usage,
 )
-from .streaming import stream_completion
 from .tool_parse import parse_tool_calls, strip_think_tags
 
 DEBUG = os.environ.get("ORTHRUS_DEBUG", "0") == "1"
@@ -153,23 +152,11 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         logger.debug(json.dumps({"request_id": request_id, "event": "request", "body": request.model_dump()}))
         logger.debug(json.dumps({"request_id": request_id, "event": "prompt", "prompt": prompt}))
 
-    # Plain streaming: no tools, client wants SSE
-    if request.stream and not has_tools:
-        return StreamingResponse(
-            stream_completion(
-                _model, _tokenizer, prompt, temperature, top_p, max_tokens, stop, request_id,
-            ),
-            media_type="text/event-stream",
-        )
-
-    # Buffered path: tools present (must see full output to parse tool calls),
-    # or client did not request streaming.
-    #
-    # If the client requested streaming we also need to keep the connection alive
-    # while generating — diffusion-mode generation can take 60-90s and HTTP
-    # clients time out waiting for the first byte. We do this by returning an
-    # SSE StreamingResponse that ticks keepalive comments while the GPU works,
-    # then emits the actual result chunks when generation completes.
+    # Streaming path: buffer generation, emit SSE keepalive pings every 5s so
+    # the client's read-timeout doesn't fire during long diffusion-mode runs,
+    # then emit the actual result chunks (with tool_calls if any) when done.
+    # Diffusion mode generates in blocks of 32 so true token-by-token streaming
+    # isn't meaningful — buffered + pings is the only viable shape here.
     if request.stream:
         return StreamingResponse(
             _buffered_sse(

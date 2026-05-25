@@ -210,17 +210,25 @@ def test_streaming_buffered_no_tool_call_content_chunk(client):
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
 
 
-# ----------------- streaming without tools (stream_completion path) -----------------
+# ----------------- streaming without tools (now also buffered SSE) -----------------
 
-def test_streaming_no_tools_path():
-    """
-    stream_completion uses TextIteratorStreamer in a thread directly against the
-    real model — stubbing it cleanly would require either a fake streamer or a
-    deep monkeypatch of streaming.py internals. This path is scheduled for removal
-    in todo.md item #2 (delete streaming.py, route everything through buffered SSE).
-    When that lands, the buffered path's tests above cover the contract.
-    """
-    pytest.skip("stream_completion path being unified into buffered SSE in todo.md #2")
+def test_streaming_no_tools(client):
+    """Post-deletion of streaming.py: stream=True without tools goes through the
+    same buffered SSE path as stream=True with tools."""
+    with patch("orthrus_serve.main.generate", return_value=_result("hi there", completion_tokens=2)):
+        r = client.post("/v1/chat/completions", json={
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": True,
+        })
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/event-stream")
+    chunks = _parse_sse(r.text)
+    assert chunks[0]["choices"][0]["delta"].get("role") == "assistant"
+    content_chunks = [c for c in chunks if c["choices"][0]["delta"].get("content")]
+    assert content_chunks
+    assert content_chunks[0]["choices"][0]["delta"]["content"] == "hi there"
+    assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
+    assert r.text.rstrip().endswith("data: [DONE]")
 
 
 # ----------------- error paths -----------------

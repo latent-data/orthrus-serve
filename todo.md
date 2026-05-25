@@ -15,18 +15,7 @@ Post-benchmark cleanup. Action after the diff vs no-diff comparison is finalised
 
 Action: extract a single `run_and_postprocess(prompt, …)` coroutine returning `(tool_calls_out, content, finish_reason, result, t_first_token, t_total)`. Have two thin emitters consume it — one returns a `ChatCompletionResponse`, the other yields SSE chunks. Expected diff: ~-80 lines, single source of truth for logging.
 
-### 2. Delete `streaming.py`
-
-`stream_completion` is a third generate path, used only when `request.stream and not has_tools`. Problems:
-
-- Hardcodes `use_diffusion_mode: True` (line 45) — `--no-diffusion` doesn't affect it.
-- Uses `TextIteratorStreamer` in a thread — the pattern that commit `3772692` removed from `_buffered_sse` because it hung.
-- Uses `tokenizer(prompt, …)` not `tokenizer.encode(...)` — inconsistent with `generation.py` after `4e1f93f`.
-- Reinvents stop-string handling rather than reusing `StringStoppingCriteria`.
-
-You don't get real token-by-token streaming from diffusion mode anyway (blocks of 32). Action: delete `streaming.py`, route all `request.stream=True` through the unified buffered-SSE coroutine from item 1.
-
-### 3. Centralise env-var config
+### 2. Centralise env-var config
 
 Env vars are read at module import in `main.py`, inside `model.load_model_and_tokenizer`, inside `generation.generate`, inside `lifespan`, and *per request* in the INFO log.
 
