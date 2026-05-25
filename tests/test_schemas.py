@@ -18,7 +18,8 @@ from orthrus_serve.openai_schemas import (
 
 def test_chat_completion_request_defaults():
     req = ChatCompletionRequest(
-        messages=[Message(role="user", content="hello")]
+        model="orthrus-qwen3-8b",
+        messages=[Message(role="user", content="hello")],
     )
     assert req.model == "orthrus-qwen3-8b"
     assert req.max_tokens == 2048
@@ -26,8 +27,15 @@ def test_chat_completion_request_defaults():
     assert req.tools is None
 
 
+def test_chat_completion_request_model_required():
+    """model is required per OpenAI spec — schema should reject if missing."""
+    with pytest.raises(Exception):  # pydantic ValidationError
+        ChatCompletionRequest(messages=[Message(role="user", content="hi")])
+
+
 def test_chat_completion_request_with_tools():
     req = ChatCompletionRequest(
+        model="orthrus-qwen3-8b",
         messages=[Message(role="user", content="what is the weather?")],
         tools=[
             ToolDefinition(
@@ -108,6 +116,7 @@ def test_model_list():
 
 def test_stop_string_normalization():
     req = ChatCompletionRequest(
+        model="orthrus-qwen3-8b",
         messages=[Message(role="user", content="hi")],
         stop="<|endoftext|>",
     )

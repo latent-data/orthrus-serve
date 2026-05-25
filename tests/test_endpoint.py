@@ -85,6 +85,7 @@ def test_models(client):
 def test_non_streaming_no_tools(client):
     with patch("orthrus_serve.main.generate", return_value=_result("hello world", completion_tokens=2)):
         r = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
         })
@@ -110,6 +111,7 @@ def test_non_streaming_with_tool_call(client):
     raw = '<tool_call>{"name": "get_weather", "arguments": {"city": "London"}}</tool_call>'
     with patch("orthrus_serve.main.generate", return_value=_result(raw, completion_tokens=15)):
         r = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "weather?"}],
             "tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {}}}],
             "stream": False,
@@ -132,6 +134,7 @@ def test_non_streaming_strips_think_tags(client):
     raw = "<think>internal monologue</think>actual answer"
     with patch("orthrus_serve.main.generate", return_value=_result(raw, completion_tokens=5)):
         r = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "hi"}],
             "stream": False,
         })
@@ -142,10 +145,12 @@ def test_non_streaming_stop_normalization(client):
     """stop=str and stop=list[str] should both work without 500."""
     with patch("orthrus_serve.main.generate", return_value=_result("ok", completion_tokens=1)) as mock_gen:
         r1 = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "hi"}],
             "stop": "###",
         })
         r2 = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "hi"}],
             "stop": ["###", "</end>"],
         })
@@ -162,6 +167,7 @@ def test_streaming_with_tool_call(client):
     raw = '<tool_call>{"name": "ping", "arguments": {}}</tool_call>'
     with patch("orthrus_serve.main.generate", return_value=_result(raw, completion_tokens=10)):
         r = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "ping"}],
             "tools": [{"type": "function", "function": {"name": "ping", "parameters": {}}}],
             "stream": True,
@@ -186,8 +192,12 @@ def test_streaming_with_tool_call(client):
     names = [tc["function"].get("name") for c in tc_chunks for tc in c["choices"][0]["delta"]["tool_calls"]]
     assert "ping" in names
 
-    # Final chunk carries finish_reason=tool_calls
-    assert chunks[-1]["choices"][0]["finish_reason"] == "tool_calls"
+    # Final chunk carries finish_reason=tool_calls AND usage
+    final = chunks[-1]
+    assert final["choices"][0]["finish_reason"] == "tool_calls"
+    assert final["usage"]["prompt_tokens"] == 100
+    assert final["usage"]["completion_tokens"] == 10
+    assert final["usage"]["total_tokens"] == 110
 
     # Stream terminates with [DONE]
     assert r.text.rstrip().endswith("data: [DONE]")
@@ -197,6 +207,7 @@ def test_streaming_buffered_no_tool_call_content_chunk(client):
     """When stream=True + tools requested but model returns plain text, content is emitted as a single delta."""
     with patch("orthrus_serve.main.generate", return_value=_result("hi there", completion_tokens=2)):
         r = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "hello"}],
             # tools forces the buffered SSE path even though model returns no <tool_call>
             "tools": [{"type": "function", "function": {"name": "anything", "parameters": {}}}],
@@ -217,6 +228,7 @@ def test_streaming_no_tools(client):
     same buffered SSE path as stream=True with tools."""
     with patch("orthrus_serve.main.generate", return_value=_result("hi there", completion_tokens=2)):
         r = client.post("/v1/chat/completions", json={
+            "model": main.settings.served_model_id,
             "messages": [{"role": "user", "content": "hello"}],
             "stream": True,
         })
@@ -240,5 +252,8 @@ def test_returns_503_when_not_ready():
     main._ready = False
     main._request_lock = None
     c = TestClient(main.app)
-    r = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+    r = c.post("/v1/chat/completions", json={
+        "model": main.settings.served_model_id,
+        "messages": [{"role": "user", "content": "hi"}],
+    })
     assert r.status_code == 503

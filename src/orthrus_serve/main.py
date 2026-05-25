@@ -41,10 +41,10 @@ LATENCY_HIST = Histogram(
     "Request duration",
     buckets=[0.1, 0.5, 1, 2, 5, 10, 30, 60, 120],
 )
-TTFT_HIST = Histogram(
-    "orthrus_ttft_seconds",
-    "Time to first token",
-    buckets=[0.05, 0.1, 0.25, 0.5, 1, 2, 5],
+GENERATE_DURATION_HIST = Histogram(
+    "orthrus_generate_duration_seconds",
+    "GPU generation wall-time (excludes pre/post processing). Buffered API: not a TTFT.",
+    buckets=[0.05, 0.1, 0.25, 0.5, 1, 2, 5, 10, 30, 60],
 )
 
 _model = None
@@ -112,7 +112,7 @@ def _dispatch_generate(prompt, temperature, top_p, max_tokens, stop):
     )
 
 
-def _postprocess(result, request_id, t_first_token, t_total):
+def _postprocess(result, request_id, t_generate, t_total):
     """Strip think tags, parse tool calls, log INFO, observe Prometheus.
 
     Returns (tool_calls_out, content, finish_reason).
@@ -134,16 +134,16 @@ def _postprocess(result, request_id, t_first_token, t_total):
         content = output_text
 
     LATENCY_HIST.observe(t_total)
-    TTFT_HIST.observe(t_first_token)
+    GENERATE_DURATION_HIST.observe(t_generate)
 
-    tok_per_s = round(result.completion_tokens / t_first_token, 2) if t_first_token > 0 else 0.0
+    tok_per_s = round(result.completion_tokens / t_generate, 2) if t_generate > 0 else 0.0
     logger.info(
         json.dumps(
             {
                 "request_id": request_id,
                 "prompt_tokens": result.prompt_tokens,
                 "completion_tokens": result.completion_tokens,
-                "ttft_s": round(t_first_token, 3),
+                "generate_s": round(t_generate, 3),
                 "total_s": round(t_total, 3),
                 "tok_per_s": tok_per_s,
                 "tool_calls": bool(tool_calls_out),
@@ -216,12 +216,12 @@ async def chat_completions(request: ChatCompletionRequest):
                 except asyncio.CancelledError:
                     await gpu_future
                     raise
-                t_first_token = time.perf_counter() - t_generate_start
+                t_generate = time.perf_counter() - t_generate_start
     except asyncio.TimeoutError:
         raise HTTPException(status_code=503, detail="Request timed out")
 
     t_total = time.perf_counter() - t_start
-    tool_calls_out, content, finish_reason = _postprocess(result, request_id, t_first_token, t_total)
+    tool_calls_out, content, finish_reason = _postprocess(result, request_id, t_generate, t_total)
 
     response = ChatCompletionResponse(
         id=request_id,
@@ -249,7 +249,7 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
     """SSE generator: role chunk → keepalive pings while GPU works → tool_calls / content chunks → finish + [DONE]."""
     created = int(time.time())
 
-    def _chunk(delta: dict, finish_reason: str | None = None) -> str:
+    def _chunk(delta: dict, finish_reason: str | None = None, usage: dict | None = None) -> str:
         body = {
             "id": request_id,
             "object": "chat.completion.chunk",
@@ -257,6 +257,8 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
             "model": settings.served_model_id,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
+        if usage is not None:
+            body["usage"] = usage
         return f"data: {json.dumps(body)}\n\n"
 
     yield _chunk({"role": "assistant", "content": None})
@@ -277,9 +279,9 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
             await gpu_future
             raise
 
-    t_first_token = time.perf_counter() - t_generate_start
+    t_generate = time.perf_counter() - t_generate_start
     t_total = time.perf_counter() - t_start
-    tool_calls_out, content, finish_reason = _postprocess(result, request_id, t_first_token, t_total)
+    tool_calls_out, content, finish_reason = _postprocess(result, request_id, t_generate, t_total)
 
     if tool_calls_out:
         for i, tc in enumerate(tool_calls_out):
@@ -289,7 +291,12 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
     elif content:
         yield _chunk({"content": content})
 
-    yield _chunk({}, finish_reason=finish_reason)
+    usage = {
+        "prompt_tokens": result.prompt_tokens,
+        "completion_tokens": result.completion_tokens,
+        "total_tokens": result.prompt_tokens + result.completion_tokens,
+    }
+    yield _chunk({}, finish_reason=finish_reason, usage=usage)
     yield "data: [DONE]\n\n"
 
 

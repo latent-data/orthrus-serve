@@ -100,9 +100,12 @@ def summarize(reqs: list[dict]) -> None:
     tc = sum(1 for r in reqs if r.get("tool_calls"))
     print(f"Tool-call turns: {tc} / {len(reqs)}")
 
-    for field in ("completion_tokens", "prompt_tokens", "ttft_s", "total_s", "tok_per_s"):
+    # Accept either the new "generate_s" or the historical "ttft_s" field name
+    # so old logs still parse cleanly.
+    for field in ("completion_tokens", "prompt_tokens", "generate_s", "ttft_s", "total_s", "tok_per_s"):
         vals = [float(r[field]) for r in reqs if field in r]
-        _print_stats(field, vals)
+        if vals:
+            _print_stats(field, vals)
 
     total_gen = sum(r.get("total_s", 0) for r in reqs)
     print(f"Total wall-time generating: {total_gen:.1f}s")

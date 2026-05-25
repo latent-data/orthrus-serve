@@ -1,20 +1,23 @@
 # todo
 
-Outstanding cleanup after the post-benchmark refactor pass.
-
-## Smaller cleanups
-
-- **Unreachable `model` defaults in schemas** — `openai_schemas.py` defaults `model = "orthrus-qwen3-8b"` on `ChatCompletionRequest`, `ChatCompletionResponse`, `ChatCompletionChunk`, but `main.py` computes `SERVED_MODEL_ID` from `BASE_MODEL` and uses that everywhere. Request defaults never reach a constructor. Drop them.
-- **TTFT metric is misnamed** — `main.py:53-57`. The recorded value is full generate time, not first-token. Either rename the Prometheus metric or implement real TTFT (can't without a streamer).
-- **`usage` field missing in SSE response** — non-streaming returns `Usage(prompt_tokens=…, completion_tokens=…)`; `_buffered_sse` never tells the client. Minor OpenAI-compat gap.
+Empty — todo.md cleanup pass is complete.
 
 ## Done
 
-- **streaming.py deleted, all SSE unified through buffered path** — commit `a4e622d`.
-- **Collapsed parallel post-generate paths in main.py** — commit `a40c63a`. `_postprocess` and `_dispatch_generate` extracted; `chat_completions` and `_buffered_sse` both call them. Rolled in: `ToolCall(**tc)`, `asyncio.Lock` rename, `_make_chunk` → consistent `_chunk` with `finish_reason` arg, removed dead `tool_calls_raw` / `secrets` / `JSONResponse` / `Request` / `Any` / `FunctionCall` references.
-- **Centralised env-var config in `settings.py`** — this commit. Single `Settings.from_env()` frozen dataclass loaded once. `main.py`, `model.py`, `generation.py` all read `settings.x` instead of `os.environ.get(...)`. `orthrus_revision` moved from per-request log to the `model_ready` startup log.
+- **Delete `streaming.py`, unify all SSE through buffered path** — commit `a4e622d`.
+- **Collapse parallel post-generate paths in main.py** — commit `a40c63a`. `_postprocess` and `_dispatch_generate` extracted. Rolled in: `ToolCall(**tc)`, `asyncio.Lock` rename, `_make_chunk` → consistent `_chunk` with `finish_reason` arg, removed dead `tool_calls_raw` / `secrets` / `JSONResponse` / `Request` / `Any` / `FunctionCall` references.
+- **Centralised env-var config in `settings.py`** — commit `5c1ada1`. Single `Settings.from_env()` frozen dataclass loaded once; `main.py`, `model.py`, `generation.py` all read `settings.x`. `orthrus_revision` moved from per-request log to `model_ready` startup log.
+- **Schema model defaults dropped** — `ChatCompletionRequest.model` / `Response.model` / `Chunk.model` are now required, matching OpenAI spec.
+- **TTFT metric renamed to `orthrus_generate_duration_seconds`** — old name was misleading (it recorded full GPU time, not first-token). Per-request log field renamed from `ttft_s` to `generate_s`; `log_parse.py` accepts both for back-compat with older logs.
+- **SSE response now carries `usage`** — final chunk in the buffered SSE stream includes `usage = {prompt_tokens, completion_tokens, total_tokens}`, closing the OpenAI-compat gap.
+
+## Net package size
+
+- Before: 820 lines across 7 files.
+- After: ~660 lines across 7 files (streaming.py deleted, settings.py added).
+- All 28 tests pass.
 
 ## What's still deliberately left alone
 
-- `model.py`, `generation.py`, `tool_parse.py`, `openai_schemas.py` (except dead defaults) — already small and focused.
+- `model.py`, `generation.py`, `tool_parse.py`, `openai_schemas.py` — already small and focused.
 - Logging format — JSON-in-JSON envelope is awkward but `tests/utils/log_parse.py` handles it and downstream consumers may depend on it.

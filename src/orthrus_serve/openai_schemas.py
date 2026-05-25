@@ -38,7 +38,7 @@ class Message(BaseModel):
 
 
 class ChatCompletionRequest(BaseModel):
-    model: str = "orthrus-qwen3-8b"
+    model: str
     messages: list[Message]
     tools: list[ToolDefinition] | None = None
     tool_choice: ToolChoice | None = None
@@ -83,7 +83,7 @@ class ChatCompletionResponse(BaseModel):
     id: str
     object: Literal["chat.completion"] = "chat.completion"
     created: int = Field(default_factory=lambda: int(time.time()))
-    model: str = "orthrus-qwen3-8b"
+    model: str
     choices: list[Choice]
     usage: Usage
 
@@ -103,8 +103,9 @@ class ChatCompletionChunk(BaseModel):
     id: str
     object: Literal["chat.completion.chunk"] = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
-    model: str = "orthrus-qwen3-8b"
+    model: str
     choices: list[StreamChoice]
+    usage: Usage | None = None
 
 
 class ModelCard(BaseModel):
