@@ -2,18 +2,6 @@
 
 Outstanding cleanup after the post-benchmark refactor pass.
 
-## Big ones
-
-### 1. Centralise env-var config
-
-Env vars are read at module import in `main.py`, inside `model.load_model_and_tokenizer`, inside `generation.generate`, inside `lifespan`, and *per request* in the INFO log.
-
-- `ORTHRUS_BASE_MODEL` read in 3 places.
-- `ORTHRUS_DIFFUSION` read in 2 places.
-- `ORTHRUS_REVISION` read on every request, though it cannot change.
-
-Action: one `Settings` dataclass loaded once at startup. Move `orthrus_revision` from per-request log to the `model_ready` startup log.
-
 ## Smaller cleanups
 
 - **Unreachable `model` defaults in schemas** — `openai_schemas.py` defaults `model = "orthrus-qwen3-8b"` on `ChatCompletionRequest`, `ChatCompletionResponse`, `ChatCompletionChunk`, but `main.py` computes `SERVED_MODEL_ID` from `BASE_MODEL` and uses that everywhere. Request defaults never reach a constructor. Drop them.
@@ -22,8 +10,9 @@ Action: one `Settings` dataclass loaded once at startup. Move `orthrus_revision`
 
 ## Done
 
-- **#2 (was)** Delete `streaming.py`, unify all SSE through buffered path — done (commit `a4e622d`).
-- **#1 (was)** Collapse the two parallel post-generate paths in `main.py` — done (this commit). `_postprocess` and `_dispatch_generate` extracted; `chat_completions` and `_buffered_sse` both call them. Rolled in: `ToolCall(**tc)`, `asyncio.Lock` rename, `_make_chunk` → consistent `_chunk` with `finish_reason` arg, removed dead `tool_calls_raw` / `secrets` / `JSONResponse` / `Request` / `Any` / `FunctionCall` references.
+- **streaming.py deleted, all SSE unified through buffered path** — commit `a4e622d`.
+- **Collapsed parallel post-generate paths in main.py** — commit `a40c63a`. `_postprocess` and `_dispatch_generate` extracted; `chat_completions` and `_buffered_sse` both call them. Rolled in: `ToolCall(**tc)`, `asyncio.Lock` rename, `_make_chunk` → consistent `_chunk` with `finish_reason` arg, removed dead `tool_calls_raw` / `secrets` / `JSONResponse` / `Request` / `Any` / `FunctionCall` references.
+- **Centralised env-var config in `settings.py`** — this commit. Single `Settings.from_env()` frozen dataclass loaded once. `main.py`, `model.py`, `generation.py` all read `settings.x` instead of `os.environ.get(...)`. `orthrus_revision` moved from per-request log to the `model_ready` startup log.
 
 ## What's still deliberately left alone
 

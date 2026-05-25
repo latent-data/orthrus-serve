@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import logging
-import os
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
+
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -13,17 +14,12 @@ QWEN_MODEL_ID = "Qwen/Qwen3-8B"
 
 
 def load_model_and_tokenizer() -> tuple[AutoModelForCausalLM, AutoTokenizer]:
-    use_base_model = os.environ.get("ORTHRUS_BASE_MODEL", "0") == "1"
-    qwen_revision = os.environ.get(
-        "QWEN_REVISION", "b968826d9c46dd6066d109eabc6255188de91218"
-    )
-
-    if use_base_model:
-        logger.info("BASE MODEL MODE: loading %s (revision=%s)", QWEN_MODEL_ID, qwen_revision)
-        tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_ID, revision=qwen_revision)
+    if settings.base_model:
+        logger.info("BASE MODEL MODE: loading %s (revision=%s)", QWEN_MODEL_ID, settings.qwen_revision)
+        tokenizer = AutoTokenizer.from_pretrained(QWEN_MODEL_ID, revision=settings.qwen_revision)
         model = AutoModelForCausalLM.from_pretrained(
             QWEN_MODEL_ID,
-            revision=qwen_revision,
+            revision=settings.qwen_revision,
             torch_dtype=torch.bfloat16,
             device_map="cuda",
             attn_implementation="flash_attention_2",
@@ -31,21 +27,17 @@ def load_model_and_tokenizer() -> tuple[AutoModelForCausalLM, AutoTokenizer]:
         logger.info("Base model loaded on %s", next(model.parameters()).device)
         return model, tokenizer
 
-    orthrus_revision = os.environ.get(
-        "ORTHRUS_REVISION", "977a617772e91c966a8cd9b551f4151f9824b6fa"
-    )
-
-    logger.info("Loading Orthrus tokenizer (revision=%s)", orthrus_revision)
+    logger.info("Loading Orthrus tokenizer (revision=%s)", settings.orthrus_revision)
     tokenizer = AutoTokenizer.from_pretrained(
         ORTHRUS_MODEL_ID,
-        revision=orthrus_revision,
+        revision=settings.orthrus_revision,
         trust_remote_code=True,
     )
 
-    logger.info("Loading Orthrus model (revision=%s)", orthrus_revision)
+    logger.info("Loading Orthrus model (revision=%s)", settings.orthrus_revision)
     model = AutoModelForCausalLM.from_pretrained(
         ORTHRUS_MODEL_ID,
-        revision=orthrus_revision,
+        revision=settings.orthrus_revision,
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
         device_map="cuda",

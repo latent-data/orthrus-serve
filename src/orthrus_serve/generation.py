@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import logging
-import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer, StoppingCriteria, StoppingCriteriaList
+
+from .settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -48,17 +49,12 @@ def generate(
 
     do_sample = temperature is not None and temperature > 0.0
 
-    use_base_model = os.environ.get("ORTHRUS_BASE_MODEL", "0") == "1"
-    use_diffusion = (
-        not use_base_model and os.environ.get("ORTHRUS_DIFFUSION", "1") != "0"
-    )
-
     generate_kwargs: dict[str, Any] = {
         "max_new_tokens": max_tokens,
         "do_sample": do_sample,
     }
-    if not use_base_model:
-        generate_kwargs["use_diffusion_mode"] = use_diffusion
+    if not settings.base_model:
+        generate_kwargs["use_diffusion_mode"] = settings.diffusion_enabled
     if do_sample:
         generate_kwargs["temperature"] = temperature
         if top_p is not None:

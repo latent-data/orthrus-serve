@@ -77,7 +77,7 @@ def test_models(client):
     body = r.json()
     assert body["object"] == "list"
     assert len(body["data"]) == 1
-    assert body["data"][0]["id"] == main.SERVED_MODEL_ID
+    assert body["data"][0]["id"] == main.settings.served_model_id
 
 
 # ----------------- non-streaming -----------------
@@ -91,7 +91,7 @@ def test_non_streaming_no_tools(client):
     assert r.status_code == 200
     body = r.json()
     assert body["object"] == "chat.completion"
-    assert body["model"] == main.SERVED_MODEL_ID
+    assert body["model"] == main.settings.served_model_id
     assert len(body["choices"]) == 1
 
     choice = body["choices"][0]
@@ -175,7 +175,7 @@ def test_streaming_with_tool_call(client):
     # Chunk envelope conforms to chat.completion.chunk
     for c in chunks:
         assert c["object"] == "chat.completion.chunk"
-        assert c["model"] == main.SERVED_MODEL_ID
+        assert c["model"] == main.settings.served_model_id
 
     # First chunk announces the role
     assert chunks[0]["choices"][0]["delta"].get("role") == "assistant"

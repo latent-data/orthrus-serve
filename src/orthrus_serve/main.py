@@ -25,16 +25,11 @@ from .openai_schemas import (
     ToolCall,
     Usage,
 )
+from .settings import settings
 from .tool_parse import parse_tool_calls, strip_think_tags
 
-DEBUG = os.environ.get("ORTHRUS_DEBUG", "0") == "1"
-BASE_MODEL = os.environ.get("ORTHRUS_BASE_MODEL", "0") == "1"
-_thinking_env = os.environ.get("ORTHRUS_ENABLE_THINKING")
-ENABLE_THINKING: bool | None = None if _thinking_env is None else (_thinking_env == "true")
-SERVED_MODEL_ID = "qwen3-8b" if BASE_MODEL else "orthrus-qwen3-8b"
-
 logging.basicConfig(
-    level=logging.DEBUG if DEBUG else logging.INFO,
+    level=logging.DEBUG if settings.debug else logging.INFO,
     format='{"time":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","message":%(message)s}',
 )
 logger = logging.getLogger("orthrus_serve")
@@ -65,9 +60,13 @@ async def lifespan(app: FastAPI):
     loop = asyncio.get_event_loop()
     _model, _tokenizer = await loop.run_in_executor(None, load_model_and_tokenizer)
     _ready = True
-    _diffusion_on = not BASE_MODEL and os.environ.get("ORTHRUS_DIFFUSION", "1") != "0"
     logger.info(
-        json.dumps({"event": "model_ready", "diffusion": _diffusion_on, "thinking": ENABLE_THINKING})
+        json.dumps({
+            "event": "model_ready",
+            "diffusion": settings.diffusion_enabled,
+            "thinking": settings.enable_thinking,
+            "orthrus_revision": settings.orthrus_revision,
+        })
     )
     yield
 
@@ -87,7 +86,7 @@ async def list_models():
     return ModelList(
         data=[
             ModelCard(
-                id=SERVED_MODEL_ID,
+                id=settings.served_model_id,
                 owned_by="latent-data",
                 created=int(time.time()),
                 max_model_len=40960,
@@ -118,7 +117,7 @@ def _postprocess(result, request_id, t_first_token, t_total):
 
     Returns (tool_calls_out, content, finish_reason).
     """
-    if DEBUG:
+    if settings.debug:
         logger.debug(json.dumps({"request_id": request_id, "event": "raw_output", "text": result.text}))
 
     output_text = strip_think_tags(result.text)
@@ -149,7 +148,6 @@ def _postprocess(result, request_id, t_first_token, t_total):
                 "tok_per_s": tok_per_s,
                 "tool_calls": bool(tool_calls_out),
                 "finish_reason": finish_reason,
-                "orthrus_revision": os.environ.get("ORTHRUS_REVISION", "default"),
             }
         )
     )
@@ -176,7 +174,7 @@ async def chat_completions(request: ChatCompletionRequest):
     max_tokens = request.max_tokens if request.max_tokens is not None else 2048
     temperature = request.temperature
     top_p = request.top_p
-    _thinking_default = {} if ENABLE_THINKING is None else {"enable_thinking": ENABLE_THINKING}
+    _thinking_default = {} if settings.enable_thinking is None else {"enable_thinking": settings.enable_thinking}
     chat_template_kwargs = {**_thinking_default, **(request.chat_template_kwargs or {})}
 
     messages = [m.model_dump(exclude_none=True) for m in request.messages]
@@ -190,7 +188,7 @@ async def chat_completions(request: ChatCompletionRequest):
         **chat_template_kwargs,
     )
 
-    if DEBUG:
+    if settings.debug:
         logger.debug(json.dumps({"request_id": request_id, "event": "request", "body": request.model_dump()}))
         logger.debug(json.dumps({"request_id": request_id, "event": "prompt", "prompt": prompt}))
 
@@ -227,7 +225,7 @@ async def chat_completions(request: ChatCompletionRequest):
 
     response = ChatCompletionResponse(
         id=request_id,
-        model=SERVED_MODEL_ID,
+        model=settings.served_model_id,
         choices=[
             Choice(
                 message=ResponseMessage(content=content, tool_calls=tool_calls_out),
@@ -241,7 +239,7 @@ async def chat_completions(request: ChatCompletionRequest):
         ),
     )
 
-    if DEBUG:
+    if settings.debug:
         logger.debug(json.dumps({"request_id": request_id, "event": "response", "body": response.model_dump()}))
 
     return response
@@ -256,7 +254,7 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
             "id": request_id,
             "object": "chat.completion.chunk",
             "created": created,
-            "model": SERVED_MODEL_ID,
+            "model": settings.served_model_id,
             "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
         }
         return f"data: {json.dumps(body)}\n\n"
