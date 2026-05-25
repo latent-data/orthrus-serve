@@ -4,15 +4,13 @@ import asyncio
 import json
 import logging
 import os
-import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
-from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
 from .generation import generate
@@ -25,7 +23,6 @@ from .openai_schemas import (
     ModelList,
     ResponseMessage,
     ToolCall,
-    FunctionCall,
     Usage,
 )
 from .tool_parse import parse_tool_calls, strip_think_tags
@@ -42,7 +39,6 @@ logging.basicConfig(
 )
 logger = logging.getLogger("orthrus_serve")
 
-# Prometheus metrics
 REQUEST_COUNTER = Counter("orthrus_requests_total", "Total requests")
 TOOL_CALL_COUNTER = Counter("orthrus_tool_call_requests_total", "Requests that produced tool calls")
 LATENCY_HIST = Histogram(
@@ -59,13 +55,13 @@ TTFT_HIST = Histogram(
 _model = None
 _tokenizer = None
 _ready = False
-_request_semaphore: asyncio.Semaphore | None = None
+_request_lock: asyncio.Lock | None = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model, _tokenizer, _ready, _request_semaphore
-    _request_semaphore = asyncio.Semaphore(1)
+    global _model, _tokenizer, _ready, _request_lock
+    _request_lock = asyncio.Lock()
     loop = asyncio.get_event_loop()
     _model, _tokenizer = await loop.run_in_executor(None, load_model_and_tokenizer)
     _ready = True
@@ -108,8 +104,61 @@ async def metrics():
     )
 
 
+def _dispatch_generate(prompt, temperature, top_p, max_tokens, stop):
+    """Submit the generate call to the default executor; return the awaitable future."""
+    loop = asyncio.get_event_loop()
+    return loop.run_in_executor(
+        None,
+        lambda: generate(_model, _tokenizer, prompt, temperature, top_p, max_tokens, stop),
+    )
+
+
+def _postprocess(result, request_id, t_first_token, t_total):
+    """Strip think tags, parse tool calls, log INFO, observe Prometheus.
+
+    Returns (tool_calls_out, content, finish_reason).
+    """
+    if DEBUG:
+        logger.debug(json.dumps({"request_id": request_id, "event": "raw_output", "text": result.text}))
+
+    output_text = strip_think_tags(result.text)
+    tool_calls_raw, content = parse_tool_calls(output_text)
+
+    finish_reason = "stop"
+    tool_calls_out = None
+    if tool_calls_raw:
+        TOOL_CALL_COUNTER.inc()
+        finish_reason = "tool_calls"
+        tool_calls_out = [ToolCall(**tc) for tc in tool_calls_raw]
+        content = content if content else None
+    else:
+        content = output_text
+
+    LATENCY_HIST.observe(t_total)
+    TTFT_HIST.observe(t_first_token)
+
+    tok_per_s = round(result.completion_tokens / t_first_token, 2) if t_first_token > 0 else 0.0
+    logger.info(
+        json.dumps(
+            {
+                "request_id": request_id,
+                "prompt_tokens": result.prompt_tokens,
+                "completion_tokens": result.completion_tokens,
+                "ttft_s": round(t_first_token, 3),
+                "total_s": round(t_total, 3),
+                "tok_per_s": tok_per_s,
+                "tool_calls": bool(tool_calls_out),
+                "finish_reason": finish_reason,
+                "orthrus_revision": os.environ.get("ORTHRUS_REVISION", "default"),
+            }
+        )
+    )
+
+    return tool_calls_out, content, finish_reason
+
+
 @app.post("/v1/chat/completions")
-async def chat_completions(request: ChatCompletionRequest, raw_request: Request):
+async def chat_completions(request: ChatCompletionRequest):
     if not _ready:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -130,15 +179,8 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     _thinking_default = {} if ENABLE_THINKING is None else {"enable_thinking": ENABLE_THINKING}
     chat_template_kwargs = {**_thinking_default, **(request.chat_template_kwargs or {})}
 
-    # Build messages as plain dicts for apply_chat_template
     messages = [m.model_dump(exclude_none=True) for m in request.messages]
-
-    # Serialise tools for the template
-    tools_raw = None
-    if request.tools:
-        tools_raw = [t.model_dump() for t in request.tools]
-
-    has_tools = bool(tools_raw)
+    tools_raw = [t.model_dump() for t in request.tools] if request.tools else None
 
     prompt = _tokenizer.apply_chat_template(
         messages,
@@ -159,27 +201,19 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     # isn't meaningful — buffered + pings is the only viable shape here.
     if request.stream:
         return StreamingResponse(
-            _buffered_sse(
-                request_id, t_start, prompt, temperature, top_p, max_tokens, stop
-            ),
+            _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tokens, stop),
             media_type="text/event-stream",
         )
 
     try:
         async with asyncio.timeout(300):
-            async with _request_semaphore:
+            async with _request_lock:
                 t_generate_start = time.perf_counter()
-                loop = asyncio.get_event_loop()
-                gpu_future = loop.run_in_executor(
-                    None,
-                    lambda: generate(
-                        _model, _tokenizer, prompt, temperature, top_p, max_tokens, stop
-                    ),
-                )
+                gpu_future = _dispatch_generate(prompt, temperature, top_p, max_tokens, stop)
                 try:
                     # shield ensures that if this request is cancelled (client disconnect),
                     # we still wait for the GPU thread to finish before releasing the
-                    # semaphore — preventing a second generate() call overlapping on the GPU.
+                    # lock — preventing a second generate() call overlapping on the GPU.
                     result = await asyncio.shield(gpu_future)
                 except asyncio.CancelledError:
                     await gpu_future
@@ -189,34 +223,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         raise HTTPException(status_code=503, detail="Request timed out")
 
     t_total = time.perf_counter() - t_start
-    LATENCY_HIST.observe(t_total)
-    TTFT_HIST.observe(t_first_token)
-
-    if DEBUG:
-        logger.debug(json.dumps({"request_id": request_id, "event": "raw_output", "text": result.text}))
-
-    output_text = strip_think_tags(result.text)
-    tool_calls_raw, content = parse_tool_calls(output_text)
-
-    finish_reason = "stop"
-    tool_calls_out = None
-
-    if tool_calls_raw:
-        TOOL_CALL_COUNTER.inc()
-        finish_reason = "tool_calls"
-        tool_calls_out = [
-            ToolCall(
-                id=tc["id"],
-                function=FunctionCall(
-                    name=tc["function"]["name"],
-                    arguments=tc["function"]["arguments"],
-                ),
-            )
-            for tc in tool_calls_raw
-        ]
-        content = content if content else None
-    else:
-        content = output_text
+    tool_calls_out, content, finish_reason = _postprocess(result, request_id, t_first_token, t_total)
 
     response = ChatCompletionResponse(
         id=request_id,
@@ -237,53 +244,28 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
     if DEBUG:
         logger.debug(json.dumps({"request_id": request_id, "event": "response", "body": response.model_dump()}))
 
-    tok_per_s = round(result.completion_tokens / t_first_token, 2) if t_first_token > 0 else 0.0
-    logger.info(
-        json.dumps(
-            {
-                "request_id": request_id,
-                "prompt_tokens": result.prompt_tokens,
-                "completion_tokens": result.completion_tokens,
-                "ttft_s": round(t_first_token, 3),
-                "total_s": round(t_total, 3),
-                "tok_per_s": tok_per_s,
-                "tool_calls": bool(tool_calls_raw),
-                "finish_reason": finish_reason,
-                "orthrus_revision": os.environ.get("ORTHRUS_REVISION", "default"),
-            }
-        )
-    )
-
     return response
 
 
 async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tokens, stop):
-    """
-    Streaming response for tool-call requests.
-
-    Runs generation in an executor thread while emitting SSE keepalive comments
-    every 5 s so the client's read-timeout doesn't fire during long diffusion-mode
-    generations. The full output is buffered, parsed for tool calls, then emitted
-    as structured SSE chunks.
-    """
-    loop = asyncio.get_event_loop()
+    """SSE generator: role chunk → keepalive pings while GPU works → tool_calls / content chunks → finish + [DONE]."""
     created = int(time.time())
 
-    def _make_chunk(delta: dict) -> str:
-        return f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': SERVED_MODEL_ID, 'choices': [{'index': 0, 'delta': delta, 'finish_reason': None}]})}\n\n"
+    def _chunk(delta: dict, finish_reason: str | None = None) -> str:
+        body = {
+            "id": request_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": SERVED_MODEL_ID,
+            "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}],
+        }
+        return f"data: {json.dumps(body)}\n\n"
 
-    # Role chunk sent immediately so the client knows the stream is live.
-    yield _make_chunk({"role": "assistant", "content": None})
+    yield _chunk({"role": "assistant", "content": None})
 
     t_generate_start = time.perf_counter()
-
-    async with _request_semaphore:
-        gpu_future = loop.run_in_executor(
-            None,
-            lambda: generate(
-                _model, _tokenizer, prompt, temperature, top_p, max_tokens, stop
-            ),
-        )
+    async with _request_lock:
+        gpu_future = _dispatch_generate(prompt, temperature, top_p, max_tokens, stop)
         try:
             while True:
                 try:
@@ -292,70 +274,24 @@ async def _buffered_sse(request_id, t_start, prompt, temperature, top_p, max_tok
                 except asyncio.TimeoutError:
                     yield ": ping\n\n"
         except asyncio.CancelledError:
-            # Client disconnected — drain the GPU before releasing the semaphore
+            # Client disconnected — drain the GPU before releasing the lock
             # so no second generate() call overlaps on the GPU.
             await gpu_future
             raise
 
     t_first_token = time.perf_counter() - t_generate_start
     t_total = time.perf_counter() - t_start
-    LATENCY_HIST.observe(t_total)
-    TTFT_HIST.observe(t_first_token)
-
-    if DEBUG:
-        logger.debug(json.dumps({"request_id": request_id, "event": "raw_output", "text": result.text}))
-
-    output_text = strip_think_tags(result.text)
-    tool_calls_raw, content = parse_tool_calls(output_text)
-
-    finish_reason = "stop"
-    tool_calls_out = None
-
-    if tool_calls_raw:
-        TOOL_CALL_COUNTER.inc()
-        finish_reason = "tool_calls"
-        tool_calls_out = [
-            ToolCall(
-                id=tc["id"],
-                function=FunctionCall(
-                    name=tc["function"]["name"],
-                    arguments=tc["function"]["arguments"],
-                ),
-            )
-            for tc in tool_calls_raw
-        ]
-
-    tok_per_s = round(result.completion_tokens / t_first_token, 2) if t_first_token > 0 else 0.0
-    logger.info(
-        json.dumps(
-            {
-                "request_id": request_id,
-                "prompt_tokens": result.prompt_tokens,
-                "completion_tokens": result.completion_tokens,
-                "ttft_s": round(t_first_token, 3),
-                "total_s": round(t_total, 3),
-                "tok_per_s": tok_per_s,
-                "tool_calls": bool(tool_calls_raw),
-                "finish_reason": finish_reason,
-                "orthrus_revision": os.environ.get("ORTHRUS_REVISION", "default"),
-            }
-        )
-    )
+    tool_calls_out, content, finish_reason = _postprocess(result, request_id, t_first_token, t_total)
 
     if tool_calls_out:
         for i, tc in enumerate(tool_calls_out):
-            yield _make_chunk({
-                "tool_calls": [{"index": i, "id": tc.id, "type": "function",
-                                "function": {"name": tc.function.name, "arguments": ""}}]
-            })
-            yield _make_chunk({
-                "tool_calls": [{"index": i, "function": {"arguments": tc.function.arguments}}]
-            })
-    else:
-        if content:
-            yield _make_chunk({"content": content})
+            yield _chunk({"tool_calls": [{"index": i, "id": tc.id, "type": "function",
+                                          "function": {"name": tc.function.name, "arguments": ""}}]})
+            yield _chunk({"tool_calls": [{"index": i, "function": {"arguments": tc.function.arguments}}]})
+    elif content:
+        yield _chunk({"content": content})
 
-    yield f"data: {json.dumps({'id': request_id, 'object': 'chat.completion.chunk', 'created': created, 'model': SERVED_MODEL_ID, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': finish_reason}]})}\n\n"
+    yield _chunk({}, finish_reason=finish_reason)
     yield "data: [DONE]\n\n"
 
 

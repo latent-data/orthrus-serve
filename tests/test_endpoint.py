@@ -238,7 +238,7 @@ def test_returns_503_when_not_ready():
     # Build a TestClient without triggering lifespan by NOT using context-manager form.
     # _ready stays False since lifespan never ran.
     main._ready = False
-    main._request_semaphore = None
+    main._request_lock = None
     c = TestClient(main.app)
     r = c.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
     assert r.status_code == 503
