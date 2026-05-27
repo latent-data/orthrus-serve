@@ -13,6 +13,8 @@ Full per-scenario / per-category outputs from the tool-eval-bench sweeps cited i
 | `2026-05-27T11-21-32Z_f865fa.md` | May 27 | Qwen3-8B base (fp8) | 74 | 3.8 s | 801.7 s |
 | `2026-05-27T11-48-43Z_a24531.md` | May 27 | Orthrus no-diff (fp8) | 74 | 3.9 s | 810.2 s |
 | `2026-05-27T13-48-48Z_cbc6af.md` | May 27 | Orthrus diffusion (fp8-row) | 69 | 3.6 s | 672.3 s |
+| `2026-05-27T15-48-11Z_9716ca.md` | May 27 | Orthrus diffusion (nvfp4) | 71 | 1.4 s | 253.7 s |
+| `2026-05-27T15-59-16Z_9716ca.md` | May 27 | Orthrus no-diff (nvfp4) | 69 | 2.6 s | 521.0 s |
 
 Note: the two Orthrus fp8 runs (diffusion and no-diff) share the same `Model (API)` field of `orthrus-qwen3-8b-fp8` because `served_model_id` includes the quant suffix but not the diffusion-mode flag. They're distinguished here by the median-turn-time and wall-clock columns above and (in the .md files themselves) by the `Run ID` timestamp.
 

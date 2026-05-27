@@ -255,6 +255,38 @@
           "snippet": "Here's a complete implementation of the `BoundedPriorityQueue` class using a binary heap, along with a comprehensive `unittest.TestCase` to test all the required functionality.  ---  ### \u2705 **BoundedPriorityQueue Implementation**  ```python from typing import Generic, TypeVar, List, Tuple, Optional, "
         }
       }
+    },
+    "orthrus_diffusion_nvfp4": {
+      "timestamp_utc": "2026-05-27T15:43:10.542344+00:00",
+      "base_url": "http://localhost:8080",
+      "model": "orthrus-qwen3-8b-nvfp4",
+      "label": "orthrus_diffusion_nvfp4",
+      "config": {
+        "max_new_tokens": 2048,
+        "runs": 1,
+        "warmup": true,
+        "disable_thinking": true,
+        "prompts": [
+          "short",
+          "long"
+        ]
+      },
+      "results": {
+        "short": {
+          "prompt_tokens": 31,
+          "tokens": 329,
+          "elapsed": 6.952,
+          "tps": 47.32,
+          "snippet": "Here's a Python program that counts the frequency of each word in a paragraph:  ```python import re from collections import Counter  def count_word_frequency(paragraph):     # Convert paragraph to lowercase and remove punctuation     words = re.findall(r'\\b\\w+\\b', paragraph.lower())          # Count"
+        },
+        "long": {
+          "prompt_tokens": 203,
+          "tokens": 1419,
+          "elapsed": 15.97,
+          "tps": 88.86,
+          "snippet": "Here's a complete implementation of the `BoundedPriorityQueue` class using a binary heap, along with a comprehensive `unittest.TestCase` that covers all the required functionality.  ---  ### \u2705 **BoundedPriorityQueue Class**  ```python from typing import Generic, TypeVar, List, Optional, Iterator, Un"
+        }
+      }
     }
   }
 }

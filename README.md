@@ -25,7 +25,8 @@ PORT=9090 ./run.sh              # use a different port
 ./run.sh --enable-thinking      # force thinking tokens on (model default is off)
 ./run.sh --disable-thinking     # force thinking tokens off
 ./run.sh --quant fp8            # serve at fp8 (per-tensor weight + per-token activation, native _scaled_mm; see quantization.md)
-./run.sh --quant fp8-row        # serve at fp8 with per-row weight scales (slightly higher fidelity, ~12% slower than fp8 on sm_121)
+./run.sh --quant fp8-row        # serve at fp8 with per-row weight scales (note: breaks the diffusion drafter; see quantization.md)
+./run.sh --quant nvfp4          # serve at NVFP4 (4-bit per-block, native triton; 88.9 vs 65.3 long tok/s vs fp8, 6.4 GB vs 10.4 GB)
 ```
 
 Environment variables you can override (defaults are baked into the Dockerfile):
@@ -38,7 +39,7 @@ Environment variables you can override (defaults are baked into the Dockerfile):
 | `ORTHRUS_DEBUG` | `0` | Set to `1` for verbose JSON debug logs |
 | `ORTHRUS_BASE_MODEL` | `0` | Set to `1` to load Qwen3-8B instead of Orthrus |
 | `ORTHRUS_ENABLE_THINKING` | unset | Set to `true` or `false` to override the model default |
-| `ORTHRUS_QUANT` | unset | Quantisation scheme: `fp8` (recommended; per-tensor weight + per-token activation, native fp8 matmul via `torch._scaled_mm`, ~1.3x speedup + ~1.8x memory reduction on Blackwell), `fp8-row` (same as `fp8` but per-row weight scales for accuracy-sensitive workloads; ~1.17x speedup on sm_121, ~12% behind `fp8` per-tensor because cuBLAS's per-row kernel is less tuned on Blackwell), or `fp8-weight-only` (storage-only via dequant; much slower than bf16, use only on hardware without `_scaled_mm`). Unset = bf16. See [`quantization.md`](quantization.md). |
+| `ORTHRUS_QUANT` | unset | Quantisation scheme: `fp8` (recommended default; per-tensor weight + per-token activation, native fp8 matmul via `torch._scaled_mm`, ~1.3x speedup + ~1.8x memory reduction on Blackwell), `nvfp4` (4-bit per-block weights + per-tensor activations, native triton-fp4 kernel; ~1.74x bf16 long-prompt throughput / 2.89x memory reduction; 3 tool-eval-bench points below fp8 but drafter still partially survives), `fp8-row` (per-row weight scales; **breaks the diffusion drafter — see quantization.md before using**), or `fp8-weight-only` (storage-only via dequant; much slower than bf16, use only on hardware without `_scaled_mm`). Unset = bf16. See [`quantization.md`](quantization.md). |
 
 ## Endpoints
 
@@ -79,8 +80,10 @@ Setup intent: validate the [orthrus-bench-spark PR 4 prediction](../orthrus-benc
 | Qwen3-8B bf16 (May 25) | `benchmarks/results/tool-eval-bench/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 | 60 | 921.0 s |
 | **Qwen3-8B fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-21-32Z_f865fa.md` | **74** | **3.8 s** | **41** | **64** | **801.7 s** |
 | Orthrus diffusion fp8-row | `benchmarks/results/tool-eval-bench/2026-05-27T13-48-48Z_cbc6af.md` | 69 | 3.6 s | 43 | 61 | 672.3 s |
+| **Orthrus diffusion nvfp4** | `benchmarks/results/tool-eval-bench/2026-05-27T15-48-11Z_9716ca.md` | **71** | **1.4 s** | **76** | **72** | **253.7 s** |
+| Orthrus no-diff nvfp4 | `benchmarks/results/tool-eval-bench/2026-05-27T15-59-16Z_9716ca.md` | 69 | 2.6 s | 55 | 65 | 521.0 s |
 
-Wall-clock totals are derived from the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements at fp8 (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8, see "Long-form generation at fp8" below) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly. The fp8-row row is a negative result: per-row quantisation breaks the diffusion drafter and collapses throughput to AR speed. Full mechanism in [`quantization.md`'s "Per-row fp8 breaks the diffusion drafter"](quantization.md#per-row-fp8-breaks-the-diffusion-drafter) and the section "Per-row fp8 (negative result)" below.
+Wall-clock totals are derived from the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements at fp8 (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8, see "Long-form generation at fp8" below) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly. The fp8-row row is a negative result: per-row quantisation breaks the diffusion drafter and collapses throughput to AR speed (full mechanism in [`quantization.md`'s "Per-row fp8 breaks the diffusion drafter"](quantization.md#per-row-fp8-breaks-the-diffusion-drafter) and the "Per-row fp8 (negative result)" section below). The nvfp4 row is the fastest configuration in this table: 4-bit weights with per-block scales fire on Blackwell-native triton kernels (smoke test 1.74x bf16 long-prompt, here 31% wall-clock reduction vs fp8). Accuracy drops 3 points vs fp8 (71 vs 74); see the "NVFP4 (4-bit, ships)" section below for the full story.
 
 **Headline: all three configs tie at 74/100 (102/138 points) under fp8. Orthrus diffusion is 2.3× faster on median turn time than either AR-mode arm.** The 3-4× diffusion speedup over vanilla AR carries through fp8 cleanly; accuracy converges across all three arms.
 
@@ -141,6 +144,57 @@ Geomean Orthrus-diffusion-fp8 vs Qwen3-8B-AR-fp8 speedup: **3.79×** (3.08× sho
 
 Memory footprint also drops (per the smoke test in `quantization.md`): ~18.5 GB bf16 → ~10.4 GB fp8 for Orthrus-Qwen3-8B (~1.77× reduction; the ceiling is ~1.8× because the embedding and lm_head stay bf16).
 
+### NVFP4 (4-bit, ships)
+
+Added 2026-05-27 after the fp8-row investigation surfaced the drafter-rejection mechanism. NVFP4 (`Float4` weights with per-block fp8 scales, via `torchao.prototype.mx_formats.NVFP4InferenceConfig`) is structurally per-block — each ~16-element block of weights gets its own scale — so it was an open question whether the drafter would survive that finer-grained perturbation. It does, but **only partially** — the drafter is mildly disrupted, not fully aligned.
+
+HTTP throughput (`benchmarks/results/results_http.json`):
+
+| Config | short tok/s | long tok/s |
+|---|---:|---:|
+| Orthrus diffusion bf16 | 38.8 | 51.1 |
+| Orthrus diffusion fp8 | 43.5 | 65.3 |
+| **Orthrus diffusion nvfp4** | **47.3** | **88.9** |
+
+Long-prompt: NVFP4 is **+36% over fp8** and **+74% over bf16**. The diffusion drafter accept rate stays high enough that output is the same kind of code-completion long-form text as fp8/bf16, not the AR-fallback signature we see at fp8-row.
+
+tool-eval-bench (`benchmarks/results/tool-eval-bench/2026-05-27T15-48-11Z_9716ca.md` and `2026-05-27T15-59-16Z_9716ca.md`):
+
+| Config | Final score | Median turn | Wall-clock | Safety-critical fails |
+|---|---:|---:|---:|---:|
+| Orthrus diffusion bf16 | 72 | 2.0 s | 359.5 s | 4 |
+| Orthrus diffusion fp8 | 74 | 1.7 s | 331.0 s | 4 |
+| **Orthrus diffusion nvfp4** | **71** | **1.4 s** | **253.7 s** | **5** |
+| Orthrus no-diff nvfp4 | 69 | 2.6 s | 521.0 s | 3 |
+
+The no-diff row is the load-bearing comparison: NVFP4 in pure AR mode hits 69/100 at median 2.6s; turning the drafter on lifts the score to 71 AND cuts median turn time to 1.4s. So the drafter at NVFP4 actively **adds 2 accuracy points** rather than just being neutral — opposite of fp8, where diff vs nodiff is a wash (74 vs 74). Speculative mechanism: NVFP4's per-token AR generation accumulates rounding noise per generated token; the drafter's block-parallel forward path doesn't have that same per-token accumulation, so the verify step lands on better tokens on average.
+
+But the drafter also introduces 2 new safety-critical failures specifically on tool-call grammar (TC-41 wrong param type and TC-43 omitted required param appear in diffusion mode but NOT in no-diff). So at NVFP4 the drafter is "accuracy-improving on average, schema-noisy on the margins" — speculative tokens at function-call boundaries occasionally land on schema-violating choices that pure AR would reject.
+
+Memory: 18.5 GB bf16 → 10.4 GB fp8 → **6.4 GB nvfp4**. Enough headroom to either run two NVFP4 instances on a single 128 GB Spark, or to push context length significantly beyond the 40k default with one instance plus its KV cache.
+
+**Drafter survival is a spectrum, not binary** (refined uniform-vs-structured hypothesis):
+
+| Scheme | Granularity | Drafter speedup (turn ratio) | Mechanism |
+|---|---|---:|---|
+| fp8 | per-tensor (1 scale / Linear) | **2.29×** (3.9/1.7) | uniform; every row rescaled identically; drafter fully tracks |
+| nvfp4 | per-block (~16 elements) | **1.86×** (2.6/1.4) | block-wise; high-frequency within a row, partially averages out at row level; drafter partially tracks |
+| fp8-row | per-row (1 scale / output channel) | **~1.0×** (drafter dead) | rigidly non-uniform across rows; drafter can't track at all |
+
+The refined rule: **the drafter's accept rate is a continuous function of how much the quantisation pattern looks uniform-at-the-row-level.** Per-tensor is trivially uniform → full speedup. Per-block is locally non-uniform but averages out at the row scale → partial speedup. Per-row is rigidly non-uniform at exactly the row scale → no speedup at all. Bit width matters much less than perturbation geometry: NVFP4 is 4-bit yet drafter-friendly (1.86× speedup); fp8-row is 8-bit yet drafter-hostile (1.0× speedup).
+
+**When to use NVFP4**:
+- Memory pressure (running two instances, longer contexts, larger models on smaller hardware in future)
+- Throughput priority on long-form generation (88.9 tok/s vs fp8's 65.3)
+- Accept the 3-point tool-eval-bench cost vs fp8 and the +2 schema-violation safety drift
+
+**When to stay with fp8**:
+- Accuracy-priority workloads where every point of tool-eval-bench matters
+- Workloads sensitive to function-call schema correctness (the drafter's NVFP4-mode schema-violation tendency is a small risk that doesn't exist at fp8)
+- Default for general serving (74/100 vs 71/100; 4 safety-fails vs 5)
+
+`fp8` remains the recommended default for orthrus-serve; `nvfp4` is the recommended alternative when memory or throughput dominates accuracy preferences.
+
 ### Per-row fp8 (negative result)
 
 Tried `fp8-row` (`Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`) on 2026-05-27 as a higher-fidelity alternative to per-tensor fp8. Result: it breaks the diffusion drafter and is strictly worse than `fp8` for Orthrus-diffusion serving.
@@ -162,7 +216,7 @@ Diffusion-mode fp8-row produces the same throughput as no-diff fp8-row — the d
 1. **No-diff Orthrus is indistinguishable from base Qwen3, at both bf16 and fp8.** At bf16 both arms score 70/138 (final score 70) with identical median turn time (4.4 s). At fp8 both arms are bit-identical scenario-by-scenario (both 102/138 = 74/100, 0 differences across 69 scenarios; final score 74). Same code path through the same weights at the same precision; greedy decoding gives the same output. The `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache, equivalent to stock Qwen3.
 2. **Diffusion is ~2.2× faster per turn than either AR config across both precisions.** Median turn 2.0 s vs 4.4 s at bf16, 1.7 s vs 3.8-3.9 s at fp8. The diffusion speedup carries through quantisation without weakening.
 3. **At fp8, all three arms converge to identical 74/100 (102/138 points).** Direct empirical confirmation of [orthrus-bench-spark PR 4](../orthrus-bench-spark/README.md#vanilla-qwen3-quantization-sensitivity-orthrus-is-not-uniquely-fragile-to-int8): Orthrus inherits Qwen3's quantisation sensitivity, no unique amplification from the diffusion consensus mechanism. Same 4 safety-critical failures in all three arms (TC-31, TC-34, TC-42, TC-43). See `benchmarks/results/tool-eval-bench/` for per-scenario data.
-4. **For Orthrus diffusion-mode serving, only uniform per-tensor quantisation works.** Per-row fp8 collapses the diffusion drafter (16.6 vs 65.3 tok/s long, 69 vs 74 tool-eval-bench score) because the structured per-row perturbation misaligns the drafter from the quantised teacher. The fix is not a different quantisation scheme but quantisation-aware drafter retraining (out of scope for orthrus-serve). Until that lands, the operational constraint for diffusion-mode is per-tensor only.
+4. **Drafter survival is a spectrum in quantisation granularity, not binary.** Measured drafter speedup (no-diff median / diffusion median) at sm_121: fp8 per-tensor 2.29×, NVFP4 per-block 1.86×, fp8-row per-row ~1.0× (dead). Granularity below the row level (per-block, per-tensor) preserves drafter alignment; granularity at the row level (per-row) breaks it; bit width matters much less than perturbation geometry (NVFP4 is 4-bit yet drafter-friendly, fp8-row is 8-bit yet drafter-hostile). For diffusion-mode serving: `fp8` is the recommended default, `nvfp4` is the recommended alternative when memory or throughput priorities outweigh the 3-point tool-eval-bench cost, `fp8-row` is contraindicated. Full mechanism in `quantization.md`.
 
 ### Reproducing
 
