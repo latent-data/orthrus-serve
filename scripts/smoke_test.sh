@@ -1,9 +1,24 @@
 #!/usr/bin/env bash
 # Smoke test: health, /v1/models, plain chat, tool call, SSE w/ usage.
+#
+# Verifies the HTTP surface (OpenAI-compatible API behaves as expected).
+# Does NOT verify quantisation is active / firing correctly -- for that, use
+# the dedicated `python -m orthrus_serve.quantization --smoke --scheme <X>`
+# CLI documented in quantization.md.
+#
+# By default MODEL_ID is auto-derived from /v1/models, so this script works
+# against any precision (orthrus-qwen3-8b, -fp8, -nvfp4, -fp8-row, etc.)
+# without configuration. Override MODEL_ID explicitly to assert a specific
+# served model id.
 set -uo pipefail
 
 BASE=${BASE_URL:-http://localhost:8080}
-MODEL_ID=${MODEL_ID:-orthrus-qwen3-8b}
+if [[ -z "${MODEL_ID:-}" ]]; then
+    MODEL_ID=$(curl -s "${BASE}/v1/models" | jq -r '.data[0].id' 2>/dev/null || echo "")
+    if [[ -z "$MODEL_ID" || "$MODEL_ID" == "null" ]]; then
+        MODEL_ID="orthrus-qwen3-8b"  # fallback for error messages if server unreachable
+    fi
+fi
 PASS=0
 FAIL=0
 
