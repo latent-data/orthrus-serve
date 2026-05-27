@@ -254,6 +254,44 @@ python3 benchmarks/benchmark_http.py --label qwen3_8b_ar_fp8 --model qwen3-8b --
 
 Output appends each `--label` into `results/results_http.json` (cwd-relative; run from `benchmarks/` to land in `benchmarks/results/`).
 
+## Findings: can you quantise an Orthrus model without retraining?
+
+The benchmarks above are specific to Orthrus-Qwen3-8B at 2026-05-27. The Qwen3 base is already a generation old (Qwen3.7 just shipped) and the authors will presumably release a Qwen3.7-based Orthrus checkpoint at some point. When that happens, the same question will recur: **can it be served quantised on Spark via off-the-shelf post-training quantisation, or does it need quantisation-aware training to recover the drafter?** The transferable answer from this investigation is **"it depends on the perturbation geometry, not the bit width."**
+
+### What this study found that should generalise
+
+Measured drafter speedup (no-diff median turn / diffusion median turn on tool-eval-bench, sm_121, 2026-05-27):
+
+| Scheme | Bits | Weight granularity | Drafter speedup | Ships? |
+|---|---|---|---:|---|
+| fp8 (per-tensor) | 8 | 1 scale / Linear | **2.29×** | Yes, recommended default |
+| nvfp4 (per-block) | 4 | 1 scale / ~16-element block | **1.86×** | Yes, alternative for memory pressure |
+| fp8-row (per-row) | 8 | 1 scale / output channel | **~1.0× (dead)** | No, drafter rejected |
+
+The predictive rule that emerges: **the drafter's accept rate is a continuous function of how uniform the weight perturbation looks at the row level.** Per-tensor is trivially uniform per row → drafter fully tracks. Per-block is locally non-uniform but averages out at the row scale → drafter partially tracks. Per-row is rigidly non-uniform at exactly the row scale → drafter cannot track.
+
+Crucially: **bit width matters much less than perturbation geometry.** NVFP4 is 4-bit yet drafter-friendly (1.86× speedup); fp8-row is 8-bit yet drafter-hostile (1.0× speedup). The drafter cares about relative-magnitude preservation across the weight matrix, not per-element rounding noise.
+
+### What this means for the next Orthrus checkpoint
+
+For a future Orthrus release (whether it's Qwen3.7-based, larger, or with a different teacher backbone), the answer to "can I PTQ this for serving on my Spark?" is:
+
+- **Per-tensor fp8 should work calibration-free**, with the smallest accuracy cost and full drafter speedup. The same `Float8DynamicActivationFloat8WeightConfig()` call we use here.
+- **NVFP4 (per-block ~16 elements) should also work calibration-free** for memory pressure, with a small accuracy cost (3 points here at 8B; presumably similar order at larger scales) and partial drafter speedup. The `NVFP4InferenceConfig()` call.
+- **Per-row and per-channel weight scaling will break the drafter** without quantisation-aware drafter retraining. If a future Orthrus release ships with QAT against a per-row teacher, this changes; until then, treat per-row schemes as "needs drafter retrained for this scheme."
+- **Other future schemes** (per-group with small groups, MXFP6, NVFP6, etc.) are predictable from the framework: if the weight scale granularity is below the row level (so row-level effect averages out) the drafter survives; if it's at or above the row level it doesn't. Bit width is a separate axis affecting standalone accuracy but not drafter survival.
+
+The fix for the per-row case is "retrain the drafter against a per-row-quantised teacher" (quantisation-aware drafter retraining). That belongs upstream in Orthrus training code, not in a serving stack. Until it lands, the operational constraint for any Orthrus checkpoint is: pick a PTQ scheme whose weight-perturbation pattern doesn't disrupt the drafter's calibration.
+
+### What this study doesn't answer
+
+- Sample size is 8B parameters; bigger models might have different drafter robustness (the drafter could be more forgiving with more capacity to absorb perturbation, or less forgiving with sharper near-tie distributions in tool-call grammar tokens).
+- Sample size is one teacher family (Qwen3); different teacher backbones might respond differently. The mechanism we've identified depends only on the existence of a drafter trained against a specific teacher, so the *shape* of the answer should transfer, but the specific drafter speedup numbers will not.
+- Sample is one hardware target (Blackwell sm_121). Other hardware will have different kernel-tuning gaps (the 12% per-row throughput cost we measured is a cuBLAS sm_121 fact, not a fundamental algorithmic one). The drafter-alignment finding is hardware-agnostic; the throughput numbers are not.
+- Sample is one bench (tool-eval-bench). Other accuracy benchmarks (general MMLU-style, code generation, math reasoning) might surface different sensitivities than tool-call grammar.
+
+If a future Orthrus release surprises against this framework (e.g. per-row works without retraining), the most likely cause is that the drafter's training procedure was changed to be quantisation-robust — at which point this writeup needs updating. The framework is a falsifiable prediction, not a settled rule.
+
 ## Concurrency
 
 Single uvicorn worker, requests serialised behind an asyncio semaphore. One model, one GPU. Requests time out after 300 seconds.
