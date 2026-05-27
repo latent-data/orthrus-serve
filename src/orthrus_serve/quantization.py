@@ -425,6 +425,34 @@ def _smoke_test(scheme: str = FP8) -> None:
     mem_ratio = pre_mem / post_mem if post_mem else float("nan")
     print(f"  Memory footprint:      {post_mem:.0f} MB")
     print(f"  Memory reduction:      {mem_ratio:.2f}x")
+    # Granularity introspection: prove per-row vs per-tensor actually fired.
+    # The wrapper (Float8Tensor) is the same class either way; the discriminator
+    # is the SHAPE of the .scale tensor on the wrapped weight:
+    #   - PerTensor() -> scale is a scalar (numel == 1)
+    #   - PerRow()    -> scale has out_features entries (numel == out_features)
+    # If scheme==fp8-row but the inspected scale is scalar, torchao silently
+    # fell back to per-tensor and the "fp8-row" run is actually a "fp8" run.
+    sample_scales = []
+    for fqn, mod in model.named_modules():
+        if isinstance(mod, nn.Linear) and hasattr(mod.weight, "qdata"):
+            scale = getattr(mod.weight, "scale", None)
+            if scale is not None:
+                sample_scales.append((fqn, tuple(scale.shape), scale.numel(),
+                                      mod.weight.shape))
+            if len(sample_scales) >= 3:
+                break
+    if sample_scales:
+        print(f"  Weight scale shapes (first 3 quantised Linears):")
+        for fqn, shp, n, wshp in sample_scales:
+            wshp_t = tuple(wshp)
+            kind = "PER-TENSOR" if n == 1 else (
+                f"PER-ROW (={wshp_t[0]} out_features)" if n == wshp_t[0]
+                else f"OTHER (numel={n}, weight={wshp_t})"
+            )
+            print(f"    {fqn}: scale shape {shp}, weight {wshp_t} -> {kind}")
+    else:
+        print(f"  Weight scale shapes:   (no .scale attribute found on "
+              f"wrapped weights; torchao internal layout differs)")
 
     print(f"\n[{scheme}] warmup ({WARMUP_TOKENS} tok) ...")
     _gen(model, input_ids, WARMUP_TOKENS)
