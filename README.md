@@ -167,9 +167,7 @@ tool-eval-bench (`benchmarks/results/tool-eval-bench/2026-05-27T15-48-11Z_9716ca
 | **Orthrus diffusion nvfp4** | **71** | **1.4 s** | **253.7 s** | **5** |
 | Orthrus no-diff nvfp4 | 69 | 2.6 s | 521.0 s | 3 |
 
-The no-diff row is the load-bearing comparison: NVFP4 in pure AR mode hits 69/100 at median 2.6s; turning the drafter on lifts the score to 71 AND cuts median turn time to 1.4s. So the drafter at NVFP4 actively **adds 2 accuracy points** rather than just being neutral — opposite of fp8, where diff vs nodiff is a wash (74 vs 74). Speculative mechanism: NVFP4's per-token AR generation accumulates rounding noise per generated token; the drafter's block-parallel forward path doesn't have that same per-token accumulation, so the verify step lands on better tokens on average.
-
-But the drafter also introduces 2 new safety-critical failures specifically on tool-call grammar (TC-41 wrong param type and TC-43 omitted required param appear in diffusion mode but NOT in no-diff). So at NVFP4 the drafter is "accuracy-improving on average, schema-noisy on the margins" — speculative tokens at function-call boundaries occasionally land on schema-violating choices that pure AR would reject.
+The no-diff row enables the drafter-speedup comparison: median turn 2.6s nodiff vs 1.4s diff — 1.86× drafter speedup (vs fp8's 2.29× and fp8-row's ~1.0×). Score 69 vs 71 is within noise tolerance at this seed and sample size (2 points = 3 scenarios flipping near tie tips on a 69-scenario bench) and shouldn't be read as a drafter accuracy effect either way. Safety-crit count drifts 3 vs 5 between the two arms but the specific scenarios (TC-43 passing in nodiff while failing in every other arm we've measured, TC-41 failing only in diffusion at this single seed) are also in noise territory.
 
 Memory: 18.5 GB bf16 → 10.4 GB fp8 → **6.4 GB nvfp4**. Enough headroom to either run two NVFP4 instances on a single 128 GB Spark, or to push context length significantly beyond the 40k default with one instance plus its KV cache.
 
@@ -186,12 +184,11 @@ The refined rule: **the drafter's accept rate is a continuous function of how mu
 **When to use NVFP4**:
 - Memory pressure (running two instances, longer contexts, larger models on smaller hardware in future)
 - Throughput priority on long-form generation (88.9 tok/s vs fp8's 65.3)
-- Accept the 3-point tool-eval-bench cost vs fp8 and the +2 schema-violation safety drift
+- Accept the 3-point tool-eval-bench cost vs fp8 (this is the real cost; both diff and nodiff arms show it, so it's a 4-bit-precision effect not a code-path artifact)
 
 **When to stay with fp8**:
 - Accuracy-priority workloads where every point of tool-eval-bench matters
-- Workloads sensitive to function-call schema correctness (the drafter's NVFP4-mode schema-violation tendency is a small risk that doesn't exist at fp8)
-- Default for general serving (74/100 vs 71/100; 4 safety-fails vs 5)
+- Default for general serving (74/100 vs 71/100)
 
 `fp8` remains the recommended default for orthrus-serve; `nvfp4` is the recommended alternative when memory or throughput dominates accuracy preferences.
 
