@@ -78,8 +78,9 @@ Setup intent: validate the [orthrus-bench-spark PR 4 prediction](../orthrus-benc
 | **Orthrus no-diff fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-48-43Z_a24531.md` | **74** | **3.9 s** | **41** | **64** | **810.2 s** |
 | Qwen3-8B bf16 (May 25) | `benchmarks/results/tool-eval-bench/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 | 60 | 921.0 s |
 | **Qwen3-8B fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-21-32Z_f865fa.md` | **74** | **3.8 s** | **41** | **64** | **801.7 s** |
+| Orthrus diffusion fp8-row | `benchmarks/results/tool-eval-bench/2026-05-27T13-48-48Z_cbc6af.md` | 69 | 3.6 s | 43 | 61 | 672.3 s |
 
-Wall-clock totals are derived from the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8, see "Long-form generation at fp8" below) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly.
+Wall-clock totals are derived from the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements at fp8 (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8, see "Long-form generation at fp8" below) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly. The fp8-row row is a negative result: per-row quantisation breaks the diffusion drafter and collapses throughput to AR speed. Full mechanism in [`quantization.md`'s "Per-row fp8 breaks the diffusion drafter"](quantization.md#per-row-fp8-breaks-the-diffusion-drafter) and the section "Per-row fp8 (negative result)" below.
 
 **Headline: all three configs tie at 74/100 (102/138 points) under fp8. Orthrus diffusion is 2.3× faster on median turn time than either AR-mode arm.** The 3-4× diffusion speedup over vanilla AR carries through fp8 cleanly; accuracy converges across all three arms.
 
@@ -140,11 +141,28 @@ Geomean Orthrus-diffusion-fp8 vs Qwen3-8B-AR-fp8 speedup: **3.79×** (3.08× sho
 
 Memory footprint also drops (per the smoke test in `quantization.md`): ~18.5 GB bf16 → ~10.4 GB fp8 for Orthrus-Qwen3-8B (~1.77× reduction; the ceiling is ~1.8× because the embedding and lm_head stay bf16).
 
+### Per-row fp8 (negative result)
+
+Tried `fp8-row` (`Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`) on 2026-05-27 as a higher-fidelity alternative to per-tensor fp8. Result: it breaks the diffusion drafter and is strictly worse than `fp8` for Orthrus-diffusion serving.
+
+| Config | short tok/s | long tok/s | tool-eval-bench |
+|---|---:|---:|---:|
+| Orthrus diffusion fp8 | 43.5 | 65.3 | 74 / 100 |
+| Orthrus diffusion fp8-row | 16.6 | 16.4 | 69 / 100 |
+| Orthrus no-diff fp8-row | 16.6 | 16.3 | (not benched) |
+
+Diffusion-mode fp8-row produces the same throughput as no-diff fp8-row — the diffusion speedup is gone. Combined with the 5-point tool-eval-bench regression and one extra safety-critical failure (TC-58 regressed vs the fp8 baseline), per-row fp8 fails on both axes that matter for serving.
+
+**Mechanism**: per-row quantisation rescales each output channel by a different factor, perturbing the teacher's predictions in a structured way the drafter (trained against the unquantised teacher) can't track. Verify rejects almost every draft; the pipeline degenerates to single-token AR per step. Per-tensor fp8 doesn't trigger this because its uniform rescale leaves drafter↔teacher alignment intact. Full writeup in [`quantization.md`'s "Per-row fp8 breaks the diffusion drafter"](quantization.md#per-row-fp8-breaks-the-diffusion-drafter).
+
+**Implication for Orthrus diffusion-mode serving**: the operational constraint is "uniform quantisation only" until quantisation-aware drafter retraining lands upstream. Per-row, per-group, per-channel schemes are off the table for diffusion-mode at least; they may be fine for no-diff (AR) serving or for non-Orthrus models that don't have a drafter at all.
+
 ### Conclusions
 
 1. **No-diff Orthrus is indistinguishable from base Qwen3, at both bf16 and fp8.** At bf16 both arms score 70/138 (final score 70) with identical median turn time (4.4 s). At fp8 both arms are bit-identical scenario-by-scenario (both 102/138 = 74/100, 0 differences across 69 scenarios; final score 74). Same code path through the same weights at the same precision; greedy decoding gives the same output. The `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache, equivalent to stock Qwen3.
 2. **Diffusion is ~2.2× faster per turn than either AR config across both precisions.** Median turn 2.0 s vs 4.4 s at bf16, 1.7 s vs 3.8-3.9 s at fp8. The diffusion speedup carries through quantisation without weakening.
 3. **At fp8, all three arms converge to identical 74/100 (102/138 points).** Direct empirical confirmation of [orthrus-bench-spark PR 4](../orthrus-bench-spark/README.md#vanilla-qwen3-quantization-sensitivity-orthrus-is-not-uniquely-fragile-to-int8): Orthrus inherits Qwen3's quantisation sensitivity, no unique amplification from the diffusion consensus mechanism. Same 4 safety-critical failures in all three arms (TC-31, TC-34, TC-42, TC-43). See `benchmarks/results/tool-eval-bench/` for per-scenario data.
+4. **For Orthrus diffusion-mode serving, only uniform per-tensor quantisation works.** Per-row fp8 collapses the diffusion drafter (16.6 vs 65.3 tok/s long, 69 vs 74 tool-eval-bench score) because the structured per-row perturbation misaligns the drafter from the quantised teacher. The fix is not a different quantisation scheme but quantisation-aware drafter retraining (out of scope for orthrus-serve). Until that lands, the operational constraint for diffusion-mode is per-tensor only.
 
 ### Reproducing
 

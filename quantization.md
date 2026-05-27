@@ -146,6 +146,59 @@ Two numbers per benchmark:
 
 The structural argument that this comparison is fair: under the frozen-teacher claim, Orthrus's AR projections are vanilla Qwen3-8B weights, so fp8 cast-and-dequant perturbs them identically in both endpoints. PR 4 of orthrus-bench-spark established this empirically (bit-identical divergence patterns between Orthrus AR-mode and vanilla AR-mode at the simulated-int8 level).
 
+## Per-row fp8 breaks the diffusion drafter
+
+Empirical finding from 2026-05-27 sweeps. The mechanism is load-bearing for which scheme to pick, so it gets its own section here even though the code change for `fp8-row` was small.
+
+### Setup and result
+
+Three runs of HTTP benchmark (orthrus_diffusion mode, short + long prompts) and one tool-eval-bench run at fp8-row, compared to the fp8 baseline already documented above.
+
+HTTP throughput (`benchmarks/results/results_http.json`):
+
+| Config | short tok/s | long tok/s |
+|---|---:|---:|
+| Orthrus diffusion bf16 | 38.8 | 51.1 |
+| Orthrus diffusion fp8 | **43.5** | **65.3** |
+| Orthrus diffusion fp8-row | 16.6 | 16.4 |
+| Orthrus no-diff fp8 | 14.2 | 14.0 |
+| Orthrus no-diff fp8-row | 16.6 | 16.3 |
+
+tool-eval-bench (`benchmarks/results/tool-eval-bench/2026-05-27T13-48-48Z_cbc6af.md`):
+
+| Config | Final score | Median turn | Safety-critical fails |
+|---|---:|---:|---:|
+| Orthrus diffusion fp8 | 74 | 1.7 s | 4 |
+| Orthrus diffusion fp8-row | **69** | **3.6 s** | **5** (TC-58 regressed) |
+
+Two things to notice:
+
+1. **fp8-row diffusion ≈ fp8-row no-diff** (16.6 vs 16.6 short, 16.4 vs 16.3 long). Diffusion mode contributes zero throughput benefit. Compare with fp8: diffusion 43.5/65.3 vs no-diff 14.2/14.0; the diffusion speedup at fp8 is 3.1×/4.7× over its no-diff counterpart.
+2. **The smoke test does NOT catch this.** Smoke-test verdict for fp8-row on sm_121 is `GOOD` (1.17x bf16 throughput, kernels firing, output sane). The regression is invisible to a single-prompt HF `generate` call because the diffusion drafter's verify path isn't exercised.
+
+### Mechanism
+
+The Orthrus diffusion drafter was trained to predict tokens that the AR teacher would also predict. In serving, the drafter proposes a block of candidate tokens; the AR teacher verifies them in parallel; accepted prefix is committed, rejected suffix is discarded, drafter is re-invoked. The diffusion speedup comes from accepting multiple tokens per teacher forward.
+
+Quantising the teacher introduces noise that perturbs the teacher's predictions. The drafter, trained against an unquantised teacher, will agree less often. Whether this is fatal depends on how the noise is patterned:
+
+- **`fp8` (per-tensor)**: one symmetric scale per Linear. The perturbation is uniform across rows — every row of every weight matrix is rescaled by the same factor. Drafter and teacher's logits move together; agreement rate stays high enough that the verify path keeps accepting; the diffusion speedup is preserved.
+- **`fp8-row` (per-row)**: one scale per output channel. Different rows get different rescalings. The teacher's output logits shift in a structured pattern that the drafter, which has internalised the unquantised teacher's relative logit magnitudes, doesn't track. Verify rejects almost every draft. The pipeline degenerates to single-token AR per step.
+
+The empirical signature of this degenerate state is the diffusion-mode throughput collapsing to the no-diff throughput at the same precision: under fp8-row both modes land at ~16 tok/s, indistinguishable.
+
+The 5-point tool-eval-bench accuracy regression is downstream of the same teacher perturbation: even in AR mode, per-row's structured noise produces different next-token decisions than per-tensor's uniform noise (smoke-test output already showed this: bit-different decoding even on a single-prompt greedy generation). The drafter-rejection cascade doesn't directly cause the accuracy loss, but the underlying teacher-perturbation pattern that causes the rejection cascade also lands tool-call-grammar tokens on different near-tie tips.
+
+### What this means for scheme choice
+
+- **For serving Orthrus diffusion mode**: use `fp8`, not `fp8-row`. The 12% per-tensor smoke-test gap was misleading; per-row's actual cost on serving is 2× slowdown plus 5-point accuracy regression.
+- **For serving in AR mode** (no diffusion drafter): per-row vs per-tensor is a much smaller delta and choice is dominated by accuracy preferences. We did not run a full accuracy sweep at fp8-row AR mode because the drafter-rejection finding already invalidates fp8-row for the diffusion serving path that is this project's reason to exist.
+- **For non-Orthrus models that don't have a drafter** (vanilla Qwen3 etc): the drafter-rejection effect does not apply. Per-row's cost is just the cuBLAS kernel-tuning gap (~12% on sm_121); per-row's benefit is the higher-fidelity weight scaling. Pick on accuracy preferences.
+
+### Why this is interesting beyond this repo
+
+The drafter-rejection collapse is a concrete example of how a quantisation scheme that looks numerically better at the weight level can be worse at the system level for diffusion-mode inference. The drafter is calibrated against a specific teacher; perturbing the teacher non-uniformly invalidates that calibration. The fix is not "use a different quantisation"; it's "retrain the drafter against the quantised teacher" (quantisation-aware drafter retraining). That work belongs upstream in Orthrus training code, not orthrus-serve. Until it exists, "uniform quantisation only" is the operational constraint for Orthrus diffusion-mode serving.
+
 ## What this is not
 
 - **Not a saved checkpoint pipeline.** Each serve startup re-applies the quantisation in place. For fp8 weight-only this is fine (calibration-free, deterministic, fast). For calibrated formats (AWQ, GPTQ) where "quantise once, distribute the artifact" is the right pattern, that work would graduate to a separate `orthrus-quant` project that produces HF-compatible quantised checkpoints.

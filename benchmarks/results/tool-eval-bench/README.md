@@ -12,8 +12,11 @@ Full per-scenario / per-category outputs from the tool-eval-bench sweeps cited i
 | `2026-05-27T11-01-43Z_a24531.md` | May 27 | Orthrus diffusion (fp8) | 74 | 1.7 s | 331.0 s |
 | `2026-05-27T11-21-32Z_f865fa.md` | May 27 | Qwen3-8B base (fp8) | 74 | 3.8 s | 801.7 s |
 | `2026-05-27T11-48-43Z_a24531.md` | May 27 | Orthrus no-diff (fp8) | 74 | 3.9 s | 810.2 s |
+| `2026-05-27T13-48-48Z_cbc6af.md` | May 27 | Orthrus diffusion (fp8-row) | 69 | 3.6 s | 672.3 s |
 
 Note: the two Orthrus fp8 runs (diffusion and no-diff) share the same `Model (API)` field of `orthrus-qwen3-8b-fp8` because `served_model_id` includes the quant suffix but not the diffusion-mode flag. They're distinguished here by the median-turn-time and wall-clock columns above and (in the .md files themselves) by the `Run ID` timestamp.
+
+The fp8-row diffusion run scores 5 points below the fp8 diffusion run (69 vs 74) and is 2.1x slower per turn (3.6 vs 1.7 s). Both regressions trace to per-row quantisation breaking the diffusion drafter's alignment with the (now per-row-perturbed) teacher; see "Per-row fp8 breaks the diffusion drafter" in the top-level README and quantization.md.
 
 ## Source
 
