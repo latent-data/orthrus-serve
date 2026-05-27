@@ -111,6 +111,29 @@ Geomean Orthrus-diffusion vs Qwen3-8B AR speedup: **4.06×** (3.51× short, 4.69
 
 **Output identity:** at `temperature=0.0` the first-300-character snippets in `benchmarks/results/results.json` are byte-identical across all three configs for both prompts. Greedy decode is deterministic regardless of diff / no-diff / base — modes change *speed*, not *answers*.
 
+### Long-form generation at fp8 (HTTP, 2026-05-27)
+
+Same prompts, same warmup, same `--disable-thinking`, same `benchmark_http.py` script as the bf16 sweep above. Server started with `ORTHRUS_QUANT=fp8` (via `./run.sh ... --quant fp8`), which routes through torchao's `Float8DynamicActivationFloat8WeightConfig` and `torch._scaled_mm` for native fp8 matmul on sm_121.
+
+| Prompt | Config | bf16 (May 25) | fp8 (May 27) | Δ |
+|---|---|---|---|---|
+| short | Orthrus diffusion | 38.8 tok/s | **43.5 tok/s** | +12% |
+| short | Orthrus no-diff   | 11.1 tok/s | **14.2 tok/s** | +28% |
+| short | Qwen3-8B AR       | 11.0 tok/s | **14.1 tok/s** | +28% |
+| long  | Orthrus diffusion | 51.1 tok/s | **65.3 tok/s** | +28% |
+| long  | Orthrus no-diff   | 10.9 tok/s | **14.0 tok/s** | +28% |
+| long  | Qwen3-8B AR       | 10.9 tok/s | **14.0 tok/s** | +28% |
+
+Geomean Orthrus-diffusion-fp8 vs Qwen3-8B-AR-fp8 speedup: **3.79×** (3.08× short, 4.66× long). Slightly below the bf16 ratio of 4.06× because the AR path gains a flat ~28% from fp8 while diffusion gains ~20% geomean (less to win when you were already faster). The 3-4× speedup story still holds at fp8.
+
+**Three observations on the fp8 numbers:**
+
+1. **Vanilla AR (both no-diff and base Qwen3) gets a flat +28% on both prompts.** This is the cleanest signal that native fp8 matmul kernels are firing on sm_121: if torchao had silently fallen back to dequant-then-bf16-matmul, the AR path would have regressed below bf16 (smoke test on `orthrus-bench-spark` confirmed weight-only fp8 is ~10× slower than bf16). The +28% confirms `torch._scaled_mm` is dispatched.
+2. **Diffusion short prompt only gains 12%** because per-request HTTP overhead and the bootstrap pass dominate when the whole generation is ~12 s wall-clock; the long prompt's matmul-bound generation gets the full +28% from fp8 kernels.
+3. **No-diff fp8 and base-Qwen3 fp8 are within 1% of each other** (14.2/14.0 vs 14.1/14.0), reconfirming the May 25 bf16 finding that the AR-fallback path through Orthrus is indistinguishable from base Qwen3. The PR 4 prediction from `orthrus-bench-spark` (Orthrus inherits Qwen3's quantisation sensitivity, mechanism: shared AR weights) is consistent with this throughput parity holding at fp8.
+
+Memory footprint also drops (per the smoke test in `quantization.md`): ~18.5 GB bf16 → ~10.4 GB fp8 for Orthrus-Qwen3-8B (~1.77× reduction; the ceiling is ~1.8× because the embedding and lm_head stay bf16).
+
 ### Conclusions
 
 1. **No-diff Orthrus is indistinguishable from base Qwen3 on this workload.** Median `total_s` 4.42 vs 4.43, total wall-time 919.3 vs 921.0 (<0.2%), median `tok_per_s` 9.84 vs 9.81, identical Final Score and bucket throughputs to one decimal. Direct confirmation that the `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache — same code path as stock Qwen3.
@@ -141,6 +164,19 @@ python3 benchmarks/benchmark_http.py --label orthrus_nodiff --disable-thinking -
 
 # stop, restart with --with-base-model
 python3 benchmarks/benchmark_http.py --label qwen3_8b_ar --model qwen3-8b --disable-thinking --warmup
+```
+
+For fp8 numbers, add `--quant fp8` to each `./run.sh` invocation and append `_fp8` to the label:
+
+```bash
+./run.sh --disable-thinking --quant fp8 &
+python3 benchmarks/benchmark_http.py --label orthrus_diffusion_fp8 --disable-thinking --warmup
+
+# stop, restart with --no-diffusion --quant fp8
+python3 benchmarks/benchmark_http.py --label orthrus_nodiff_fp8 --disable-thinking --warmup
+
+# stop, restart with --with-base-model --quant fp8
+python3 benchmarks/benchmark_http.py --label qwen3_8b_ar_fp8 --model qwen3-8b --disable-thinking --warmup
 ```
 
 Output appends each `--label` into `results/results_http.json` (cwd-relative; run from `benchmarks/` to land in `benchmarks/results/`).
