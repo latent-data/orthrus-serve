@@ -1,6 +1,6 @@
 # Quantisation in orthrus-serve
 
-In-process fp8 quantisation for Orthrus and vanilla Qwen3-8B served from this endpoint. Three schemes (`fp8` recommended, `fp8-row` for accuracy-sensitive workloads, `fp8-weight-only` as a portable fallback). Designed so additional schemes (NVFP4, AWQ-int4) can be added without changing the call sites.
+In-process quantisation for Orthrus and vanilla Qwen3-8B served from this endpoint. Four schemes: `fp8` (recommended), `fp8-row` (per-row weights, see Caveats below before using), `fp8-weight-only` (portable fallback), and `int8` (per-tensor int8, same format-vs-fp8 axis at the same bit width). Designed so additional schemes (NVFP4, AWQ-int4) can be added without changing the call sites.
 
 This doc covers what the feature does, how to verify it works on the target hardware, how it's wired in, and the comparison workflow it enables under tool-eval-bench.
 
@@ -35,10 +35,13 @@ Set the `ORTHRUS_QUANT` env var:
 |---|---|
 | unset / empty | bf16, no quantisation (default) |
 | `fp8` | Fp8 weights (per-tensor symmetric scale) + dynamic per-token activation quantisation, native `_scaled_mm` matmul. ~1.3x speedup, ~1.8x memory reduction on Blackwell. **Recommended default.** |
-| `fp8-row` | Same as `fp8` but with per-row (a.k.a. per-output-channel) weight scales. Higher numerical fidelity when weight rows have heterogeneous magnitudes (more common in deeper or under-distilled checkpoints). Memory matches `fp8` (the per-row scale tensor is negligible vs the weight). Throughput on Blackwell sm_121: ~12% slower than `fp8` (24.8 tok/s vs 28.0 tok/s short-prompt smoke test, 2026-05-27) because cuBLAS's per-row `_scaled_mm` kernel is less tuned on sm_121 than the per-tensor variant. Still ~17% faster than bf16. Opt-in for accuracy-sensitive workloads or when investigating accuracy regressions seen at `fp8`. |
+| `fp8-row` | Same as `fp8` but with per-row (a.k.a. per-output-channel) weight scales. Higher per-Linear numerical fidelity in principle. Memory matches `fp8`. Throughput on Blackwell sm_121: ~12% slower than `fp8` per-tensor on the smoke test (24.8 vs 28.0 tok/s short-prompt). **However, in diffusion serving mode the drafter is rejected almost every iteration under per-row, collapsing throughput to AR speed and dropping tool-eval-bench accuracy by 5 points vs `fp8`.** See "Per-row breaks the diffusion drafter" below before enabling. |
 | `fp8-weight-only` | Fp8 weight storage with bf16 matmul (dequant on every forward). ~1.8x memory reduction, ~10x slower throughput. Use only on hardware without `_scaled_mm` support, or for offline analysis where storage is the only thing that matters. |
+| `int8` | Int8 weights (per-tensor symmetric) + dynamic per-token int8 activation quantisation, native int8 matmul. Same uniform-per-tensor granularity as `fp8`, different format. Added 2026-05-27 to test whether the "uniform per-tensor preserves drafter alignment" property holds across float and integer formats. ~2x memory reduction. Throughput on sm_121: see smoke-test output (kernel tuning state at this torchao version is empirically unknown at time of adding). |
 
-The scheme names reflect what actually happens at runtime, not the historical torchao naming. The torchao mapping is: `fp8` -> `Float8DynamicActivationFloat8WeightConfig()`, `fp8-row` -> `Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`, `fp8-weight-only` -> `Float8WeightOnlyConfig()`.
+The scheme names reflect what actually happens at runtime, not the historical torchao naming. The torchao mapping is: `fp8` -> `Float8DynamicActivationFloat8WeightConfig()`, `fp8-row` -> `Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`, `fp8-weight-only` -> `Float8WeightOnlyConfig()`, `int8` -> `Int8DynamicActivationInt8WeightConfig()`.
+
+Note: torchao 0.15's fast-int8 config does not expose a `granularity` parameter, so there is no `int8-row` shipped scheme. A per-row int8 variant would have to go through the slow QDQLayout path (dequant-then-bf16-matmul), which doesn't make a fair throughput comparison.
 
 Examples:
 
