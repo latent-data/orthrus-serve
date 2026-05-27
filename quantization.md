@@ -224,7 +224,7 @@ For non-Orthrus models that don't have a drafter, only the bit-width / kernel-tu
 
 ## What this is not
 
-- **Not a saved checkpoint pipeline.** Each serve startup re-applies the quantisation in place. For fp8 weight-only this is fine (calibration-free, deterministic, fast). For calibrated formats (AWQ, GPTQ) where "quantise once, distribute the artifact" is the right pattern, that work would graduate to a separate `orthrus-quant` project that produces HF-compatible quantised checkpoints.
+- **Not a saved checkpoint pipeline.** Each serve startup re-applies the quantisation in place. For fp8 weight-only this is fine (calibration-free, deterministic, fast). For calibrated formats (AWQ = Activation-aware Weight Quantization, GPTQ = Generative Pre-trained Transformer Quantization; both algorithms compute per-weight scales using a small representative dataset rather than from the weights alone) where "quantise once, distribute the artifact" is the right pattern, that work would graduate to a separate `orthrus-quant` project that produces HF-compatible quantised checkpoints.
 - **Not a serving-stack swap.** Still HF transformers + custom Orthrus generate loop. vLLM does not currently support Orthrus's diffusion mode, so this implementation runs the same serving path as bf16, just with quantised weights underneath.
 - **Not validated for accuracy beyond smoke testing.** The accuracy validation is what tool-eval-bench is for. If a quant scheme harms task accuracy meaningfully, the eval will surface it; the in-process verification only confirms forward-pass sanity.
 

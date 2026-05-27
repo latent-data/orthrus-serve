@@ -256,7 +256,9 @@ Output appends each `--label` into `results/results_http.json` (cwd-relative; ru
 
 ## Findings: can you quantise an Orthrus model without retraining?
 
-The benchmarks above are specific to Orthrus-Qwen3-8B at 2026-05-27. The Qwen3 base is already a generation old (Qwen3.7 just shipped) and the authors will presumably release a Qwen3.7-based Orthrus checkpoint at some point. When that happens, the same question will recur: **can it be served quantised on Spark via off-the-shelf post-training quantisation, or does it need quantisation-aware training to recover the drafter?** The transferable answer from this investigation is **"it depends on the perturbation geometry, not the bit width."**
+The benchmarks above are specific to Orthrus-Qwen3-8B at 2026-05-27. The Qwen3 base is already a generation old (Qwen3.7 just shipped) and the authors will presumably release a Qwen3.7-based Orthrus checkpoint at some point. When that happens, the same question will recur: **can it be served quantised on Spark via off-the-shelf post-training quantisation (PTQ — taking a full-precision checkpoint and converting it to a quantised one with no retraining), or does it need quantisation-aware training (QAT — retraining the model while accounting for the rounding noise the quantisation will introduce) to recover the drafter?** The transferable answer from this investigation is **"it depends on the perturbation geometry, not the bit width."**
+
+(Why those two acronyms recur in this section: PTQ is what `orthrus-serve` does — it takes the released bf16 checkpoint and applies torchao's quantisation in-process, no extra training step. QAT would require the model authors to retrain Orthrus while simulating the target quantisation's noise, then release that as a separate checkpoint. PTQ is cheap and one-step; QAT is upstream and a research/training project.)
 
 ### What this study found that should generalise
 
