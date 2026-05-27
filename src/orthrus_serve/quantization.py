@@ -82,44 +82,24 @@ logger = logging.getLogger(__name__)
 #                           Blackwell. Memory still halves. Use only if you
 #                           need fp8 storage on hardware without _scaled_mm
 #                           (pre-Hopper), or for offline analysis.
-#   - "int8"             -> Int8DynamicActivationInt8WeightConfig with
-#                           per-tensor symmetric weight scaling and per-token
-#                           dynamic activation scaling. Different format,
-#                           same uniform-per-tensor granularity as "fp8".
-#                           Added 2026-05-27 to test the hypothesis that
-#                           uniform per-tensor quantisation (regardless of
-#                           float-vs-int format) preserves the Orthrus
-#                           diffusion drafter's alignment with the teacher,
-#                           whereas structured (per-row / per-channel)
-#                           quantisation breaks it.
-#
-# Note: torchao 0.15's fast-int8 path (Int8DynamicActivationInt8WeightConfig)
-# does NOT expose a `granularity` parameter; weight scaling is hard-coded
-# per-tensor. A per-row int8 variant exists only via Int8DynamicActivation
-# IntxWeightConfig with QDQLayout, which is a dequant-then-bf16-matmul slow
-# path (same category as fp8-weight-only). Not exposed here because the
-# slow path's throughput numbers wouldn't make a fair comparison; if needed
-# for the uniform-vs-structured study, run it as an offline experiment
-# rather than a shipped serving scheme.
 FP8 = "fp8"
 FP8_ROW = "fp8-row"
 FP8_WEIGHT_ONLY = "fp8-weight-only"
-INT8 = "int8"
 
-SUPPORTED_QUANT_SCHEMES = (FP8, FP8_ROW, FP8_WEIGHT_ONLY, INT8)
+SUPPORTED_QUANT_SCHEMES = (FP8, FP8_ROW, FP8_WEIGHT_ONLY)
 
-# Schemes that go through a fast native-matmul path (torch._scaled_mm for
-# fp8; int8 mma for int8). Used by the smoke test's verdict logic to decide
+# Schemes that go through the fast native-matmul path (torch._scaled_mm on
+# Hopper / Blackwell). Used by the smoke test's verdict logic to decide
 # whether a throughput regression is expected (weight-only) or a failure.
-_FAST_QUANT_SCHEMES = (FP8, FP8_ROW, INT8)
+_FAST_FP8_SCHEMES = (FP8, FP8_ROW)
 
 # Per-scheme expected speedup over bf16 (PASS threshold for the smoke
 # verdict). FP8 (per-tensor) hits ~1.33x on sm_121 short-prompt; FP8_ROW
-# (per-row) lands at ~1.17x because cuBLAS's per-row `_scaled_mm` kernel is
-# less tuned. INT8 threshold set conservatively (1.10x) since the int8
-# path's tuning state on sm_121 is empirically unknown at the time of
-# adding the scheme; the smoke test will surface the actual number.
-_FAST_QUANT_PASS_THRESHOLDS = {FP8: 1.20, FP8_ROW: 1.10, INT8: 1.10}
+# (per-row) lands at ~1.17x on the same hardware because cuBLAS's per-row
+# `_scaled_mm` kernel is less tuned than the per-tensor variant. Both are
+# net wins over bf16; the threshold per scheme exists so the verdict
+# reflects the realistic ceiling, not the per-tensor ceiling.
+_FAST_FP8_PASS_THRESHOLDS = {FP8: 1.20, FP8_ROW: 1.10}
 
 
 # ---------------------------------------------------------------------------
@@ -188,8 +168,6 @@ def apply_quantization(
         _apply_fp8_dynamic_activation_weight(model, per_row=True)
     elif scheme == FP8_WEIGHT_ONLY:
         _apply_fp8_weight_only(model)
-    elif scheme == INT8:
-        _apply_int8_dynamic_activation_weight(model)
 
     post = _memory_footprint_mb(model)
     logger.info("Quantization %r complete: footprint %.0f MB -> %.0f MB "
@@ -292,41 +270,6 @@ def _apply_fp8_dynamic_activation_weight(
         return _should_quantize_linear(fqn, module)
 
     quantize_(model, config, filter_fn=_filter)
-
-
-def _apply_int8_dynamic_activation_weight(model: nn.Module) -> None:
-    """Both weights and activations in int8, with native int8 matmul.
-
-    Different precision format from fp8 (integer not float) but at the same
-    8-bit width. Added 2026-05-27 specifically to test the hypothesis that
-    *uniform per-tensor* quantisation (regardless of format) preserves the
-    Orthrus diffusion drafter's alignment with the teacher, whereas
-    *structured per-row* quantisation breaks it. The empirical finding from
-    fp8/fp8-row on Blackwell sm_121 was: fp8 preserves drafter alignment
-    and yields the expected diffusion speedup; fp8-row collapses the
-    drafter to AR speed because per-row's structured perturbation pattern
-    misaligns the drafter (trained against an unquantised teacher) from
-    the quantised teacher.
-
-    Per-tensor symmetric weight scaling + per-token dynamic activation
-    scaling (the only granularity exposed by torchao 0.15's fast int8
-    path). Throughput on Blackwell depends on torchao's int8 kernel
-    dispatch state; the smoke test surfaces the actual numbers.
-    """
-    try:
-        from torchao.quantization import (
-            quantize_,
-            Int8DynamicActivationInt8WeightConfig,
-        )
-    except ImportError as e:
-        raise RuntimeError(
-            "torchao import failed; see fp8-weight-only error for details."
-        ) from e
-
-    def _filter(module: nn.Module, fqn: str) -> bool:
-        return _should_quantize_linear(fqn, module)
-
-    quantize_(model, Int8DynamicActivationInt8WeightConfig(), filter_fn=_filter)
 
 
 # ---------------------------------------------------------------------------
@@ -592,10 +535,10 @@ def _smoke_test(scheme: str = FP8) -> None:
                      f"hit; verify before relying on it.)")
     else:
         # FP8 / FP8_ROW (activation+weight): native fp8 matmul should give
-        # speedup. Per-scheme PASS threshold (see _FAST_QUANT_PASS_THRESHOLDS)
+        # speedup. Per-scheme PASS threshold (see _FAST_FP8_PASS_THRESHOLDS)
         # because per-row's measured ceiling on sm_121 (1.17x bf16) is
         # below per-tensor's (1.33x bf16).
-        pass_threshold = _FAST_QUANT_PASS_THRESHOLDS.get(scheme, 1.20)
+        pass_threshold = _FAST_FP8_PASS_THRESHOLDS.get(scheme, 1.20)
         if tps_ratio >= pass_threshold:
             tps_v = (f"PASS ({tps_ratio:.2f}x faster than bf16; native fp8 "
                      f"matmul kernels firing as expected; threshold "
@@ -637,16 +580,16 @@ def _smoke_test(scheme: str = FP8) -> None:
         issues.append("memory did not drop as expected")
     # Throughput regression is only a failure for fast-path schemes
     # (activation+weight, native matmul); weight-only is expected to be slow.
-    if scheme in _FAST_QUANT_SCHEMES and tps_ratio < 0.9:
+    if scheme in _FAST_FP8_SCHEMES and tps_ratio < 0.9:
         issues.append(f"throughput regressed below bf16 (expected "
-                      f">={_FAST_QUANT_PASS_THRESHOLDS.get(scheme, 1.20):.2f}x "
+                      f">={_FAST_FP8_PASS_THRESHOLDS.get(scheme, 1.20):.2f}x "
                       f"for {scheme})")
     if "FAIL" in out_v:
         issues.append("output corruption suspected")
 
-    pass_threshold = _FAST_QUANT_PASS_THRESHOLDS.get(scheme, 1.20)
+    pass_threshold = _FAST_FP8_PASS_THRESHOLDS.get(scheme, 1.20)
     if not issues:
-        if scheme in _FAST_QUANT_SCHEMES and tps_ratio >= pass_threshold:
+        if scheme in _FAST_FP8_SCHEMES and tps_ratio >= pass_threshold:
             print(f"OVERALL: GOOD ({scheme} working as expected on this "
                   f"hardware: applied, memory halved, throughput "
                   f"{tps_ratio:.2f}x bf16, threshold {pass_threshold:.2f}x).")
