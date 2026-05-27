@@ -20,6 +20,8 @@ class Settings:
     diffusion_enabled: bool
     orthrus_revision: str
     qwen_revision: str
+    quant: str | None  # one of orthrus_serve.quantization.SUPPORTED_QUANT_SCHEMES,
+                       # or None for bf16 (no quantization)
 
     @property
     def served_model_id(self) -> str:
@@ -39,6 +41,7 @@ class Settings:
             ),
             orthrus_revision=os.environ.get("ORTHRUS_REVISION", _DEFAULT_ORTHRUS_REVISION),
             qwen_revision=os.environ.get("QWEN_REVISION", _DEFAULT_QWEN_REVISION),
+            quant=os.environ.get("ORTHRUS_QUANT") or None,
         )
 
 

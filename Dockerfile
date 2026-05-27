@@ -19,8 +19,13 @@ COPY src/ src/
 # Install FastAPI/uvicorn/pydantic/prometheus-client normally (no torch conflict).
 RUN pip install ".[dev]"
 
-# --no-deps is critical: transformers/accelerate must not pull in a generic torch
-# wheel that would overwrite the NGC container's custom sm_121 build.
+# --no-deps is critical: transformers/accelerate must not pull in a generic
+# torch wheel that would overwrite the NGC container's custom sm_121 build.
+# torchao for fp8 quantisation (src/orthrus_serve/quantization.py) is NOT
+# pinned here: the NGC container already ships its own torchao build
+# (0.15.0+gitXXXX as of nvcr.io/nvidia/pytorch:25.12-py3), built to match the
+# custom torch. Overriding it with a pypi version would either drop the
+# NGC-side patches or pull a fresh torch wheel.
 RUN pip install --no-deps \
     transformers==5.8.1 \
     accelerate==1.13.0

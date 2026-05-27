@@ -24,6 +24,7 @@ PORT=9090 ./run.sh              # use a different port
 ./run.sh --with-base-model      # load Qwen3-8B instead of Orthrus
 ./run.sh --enable-thinking      # force thinking tokens on (model default is off)
 ./run.sh --disable-thinking     # force thinking tokens off
+./run.sh --quant fp8            # serve at fp8 weight-only precision (see quantization.md)
 ```
 
 Environment variables you can override (defaults are baked into the Dockerfile):
@@ -36,6 +37,7 @@ Environment variables you can override (defaults are baked into the Dockerfile):
 | `ORTHRUS_DEBUG` | `0` | Set to `1` for verbose JSON debug logs |
 | `ORTHRUS_BASE_MODEL` | `0` | Set to `1` to load Qwen3-8B instead of Orthrus |
 | `ORTHRUS_ENABLE_THINKING` | unset | Set to `true` or `false` to override the model default |
+| `ORTHRUS_QUANT` | unset | Quantisation scheme: `fp8` (recommended; native fp8 matmul via `torch._scaled_mm`, ~1.3x speedup + ~1.8x memory reduction on Blackwell) or `fp8-weight-only` (storage-only via dequant; much slower than bf16, use only on hardware without `_scaled_mm`). Unset = bf16. See [`quantization.md`](quantization.md). |
 
 ## Endpoints
 

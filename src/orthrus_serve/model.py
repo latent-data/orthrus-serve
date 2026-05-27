@@ -5,6 +5,7 @@ import logging
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
+from .quantization import apply_quantization
 from .settings import settings
 
 logger = logging.getLogger(__name__)
@@ -24,7 +25,9 @@ def load_model_and_tokenizer() -> tuple[AutoModelForCausalLM, AutoTokenizer]:
             device_map="cuda",
             attn_implementation="flash_attention_2",
         ).eval()
-        logger.info("Base model loaded on %s", next(model.parameters()).device)
+        apply_quantization(model, settings.quant)
+        logger.info("Base model loaded on %s (quant=%s)",
+                    next(model.parameters()).device, settings.quant or "bf16")
         return model, tokenizer
 
     logger.info("Loading Orthrus tokenizer (revision=%s)", settings.orthrus_revision)
@@ -43,6 +46,8 @@ def load_model_and_tokenizer() -> tuple[AutoModelForCausalLM, AutoTokenizer]:
         device_map="cuda",
         attn_implementation="flash_attention_2",
     ).eval()
+    apply_quantization(model, settings.quant)
 
-    logger.info("Model loaded successfully on %s", next(model.parameters()).device)
+    logger.info("Model loaded successfully on %s (quant=%s)",
+                next(model.parameters()).device, settings.quant or "bf16")
     return model, tokenizer

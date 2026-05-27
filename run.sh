@@ -10,8 +10,16 @@ DIFFUSION_FLAG=""
 DEBUG_FLAG=""
 BASE_MODEL_FLAG=""
 THINKING_FLAG=""
+QUANT_FLAG=""
 
+# --quant takes a value, so we need a small state machine.
+next_is_quant=0
 for arg in "$@"; do
+    if [[ "$next_is_quant" == "1" ]]; then
+        QUANT_FLAG="-e ORTHRUS_QUANT=${arg}"
+        next_is_quant=0
+        continue
+    fi
     if [[ "$arg" == "--no-build" ]]; then
         NO_BUILD=1
     elif [[ "$arg" == "--no-diffusion" ]]; then
@@ -24,6 +32,8 @@ for arg in "$@"; do
         THINKING_FLAG="-e ORTHRUS_ENABLE_THINKING=true"
     elif [[ "$arg" == "--disable-thinking" ]]; then
         THINKING_FLAG="-e ORTHRUS_ENABLE_THINKING=false"
+    elif [[ "$arg" == "--quant" ]]; then
+        next_is_quant=1
     fi
 done
 
@@ -59,7 +69,7 @@ docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 
 if [[ "$NO_BUILD" -eq 1 ]]; then
     echo "==> Skipping build; using ${NGC_IMAGE} with mounted source ..."
-    docker run "${COMMON_DOCKER_ARGS[@]}" ${DIFFUSION_FLAG} ${DEBUG_FLAG} ${BASE_MODEL_FLAG} ${THINKING_FLAG} \
+    docker run "${COMMON_DOCKER_ARGS[@]}" ${DIFFUSION_FLAG} ${DEBUG_FLAG} ${BASE_MODEL_FLAG} ${THINKING_FLAG} ${QUANT_FLAG} \
         -v "${SCRIPT_DIR}:/workspace" \
         -w /workspace \
         "${NGC_IMAGE}" \
@@ -69,5 +79,5 @@ else
     docker build -t "${IMAGE}" "${SCRIPT_DIR}"
 
     echo "==> Starting server on port ${PORT} ..."
-    docker run "${COMMON_DOCKER_ARGS[@]}" ${DIFFUSION_FLAG} ${DEBUG_FLAG} ${BASE_MODEL_FLAG} ${THINKING_FLAG} "${IMAGE}"
+    docker run "${COMMON_DOCKER_ARGS[@]}" ${DIFFUSION_FLAG} ${DEBUG_FLAG} ${BASE_MODEL_FLAG} ${THINKING_FLAG} ${QUANT_FLAG} "${IMAGE}"
 fi
