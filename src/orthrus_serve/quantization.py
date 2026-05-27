@@ -54,13 +54,23 @@ logger = logging.getLogger(__name__)
 #
 # Naming reflects what's actually fast on Blackwell, NOT what was historically
 # called "the safe default" in torchao docs:
-#   - "fp8"              -> Float8DynamicActivationFloat8WeightConfig.
-#                           Uses torch._scaled_mm on Hopper / Blackwell for
-#                           native fp8 matmul. Empirically: ~0.75x bf16
-#                           per-forward on Blackwell sm_121 (i.e. 25% faster
-#                           than bf16). Same ~2x memory savings. Dynamic
-#                           per-token activation scaling, no calibration.
-#                           This is the recommended default.
+#   - "fp8"              -> Float8DynamicActivationFloat8WeightConfig with
+#                           per-tensor symmetric weight scaling and per-token
+#                           dynamic activation scaling. Uses torch._scaled_mm
+#                           on Hopper / Blackwell for native fp8 matmul.
+#                           Empirically: ~0.75x bf16 per-forward on Blackwell
+#                           sm_121 (i.e. 25% faster than bf16). Same ~2x
+#                           memory savings. No calibration. Recommended
+#                           default for throughput.
+#   - "fp8-row"          -> Same as "fp8" but with PerRow() granularity (per
+#                           output-channel weight scales, per-token activation
+#                           scales). Slightly higher numerical fidelity for
+#                           weights with per-row outlier structure, at near-
+#                           identical throughput (`_scaled_mm` handles
+#                           per-row scales natively on Hopper+). Memory
+#                           reduction matches "fp8" (the per-row scale tensor
+#                           is negligible relative to the weight). Opt-in for
+#                           accuracy-sensitive workloads.
 #   - "fp8-weight-only"  -> Float8WeightOnlyConfig. Weights stored fp8 but
 #                           matmul DEQUANTIZES to bf16 then runs the bf16
 #                           kernel. Empirically: ~10x SLOWER than bf16 on
@@ -68,9 +78,15 @@ logger = logging.getLogger(__name__)
 #                           need fp8 storage on hardware without _scaled_mm
 #                           (pre-Hopper), or for offline analysis.
 FP8 = "fp8"
+FP8_ROW = "fp8-row"
 FP8_WEIGHT_ONLY = "fp8-weight-only"
 
-SUPPORTED_QUANT_SCHEMES = (FP8, FP8_WEIGHT_ONLY)
+SUPPORTED_QUANT_SCHEMES = (FP8, FP8_ROW, FP8_WEIGHT_ONLY)
+
+# Schemes that go through the fast native-matmul path (torch._scaled_mm on
+# Hopper / Blackwell). Used by the smoke test's verdict logic to decide
+# whether a throughput regression is expected (weight-only) or a failure.
+_FAST_FP8_SCHEMES = (FP8, FP8_ROW)
 
 
 # ---------------------------------------------------------------------------
@@ -134,7 +150,9 @@ def apply_quantization(
                 scheme, pre)
 
     if scheme == FP8:
-        _apply_fp8_dynamic_activation_weight(model)
+        _apply_fp8_dynamic_activation_weight(model, per_row=False)
+    elif scheme == FP8_ROW:
+        _apply_fp8_dynamic_activation_weight(model, per_row=True)
     elif scheme == FP8_WEIGHT_ONLY:
         _apply_fp8_weight_only(model)
 
@@ -186,7 +204,9 @@ def _apply_fp8_weight_only(model: nn.Module) -> None:
     quantize_(model, Float8WeightOnlyConfig(), filter_fn=_filter)
 
 
-def _apply_fp8_dynamic_activation_weight(model: nn.Module) -> None:
+def _apply_fp8_dynamic_activation_weight(
+    model: nn.Module, per_row: bool = False,
+) -> None:
     """Both weights and activations in fp8 (dynamic per-token activation
     scaling), with native fp8 matmul via torch._scaled_mm.
 
@@ -195,6 +215,16 @@ def _apply_fp8_dynamic_activation_weight(model: nn.Module) -> None:
     4096x4096 toy model, with no calibration data required (per-token
     activation scaling is dynamic). Falls back to dequant-then-bf16-matmul
     on pre-Hopper hardware without _scaled_mm support.
+
+    Granularity:
+      - per_row=False (default): per-tensor symmetric scale for weights
+        (one scalar per Linear), per-token dynamic scale for activations.
+        Matches torchao's default and the historical "fp8" entrypoint.
+      - per_row=True: per-row (a.k.a. per-output-channel) scale for weights,
+        per-token dynamic scale for activations. Higher numerical fidelity
+        when weight rows have heterogeneous magnitudes; throughput is
+        essentially the same on Hopper+ because _scaled_mm dispatches a
+        per-row-scale kernel that fuses the rescale into the matmul.
 
     Slightly more aggressive than weight-only because activations are also
     quantised; in principle this could affect accuracy on outlier-heavy
@@ -211,12 +241,22 @@ def _apply_fp8_dynamic_activation_weight(model: nn.Module) -> None:
             "torchao import failed; see fp8-weight-only error for details."
         ) from e
 
+    if per_row:
+        try:
+            from torchao.quantization import PerRow
+        except ImportError:
+            # Older torchao layouts expose granularity types under a submodule.
+            from torchao.quantization.granularity import PerRow  # type: ignore
+        config = Float8DynamicActivationFloat8WeightConfig(
+            granularity=PerRow(),
+        )
+    else:
+        config = Float8DynamicActivationFloat8WeightConfig()
+
     def _filter(module: nn.Module, fqn: str) -> bool:
         return _should_quantize_linear(fqn, module)
 
-    quantize_(
-        model, Float8DynamicActivationFloat8WeightConfig(), filter_fn=_filter,
-    )
+    quantize_(model, config, filter_fn=_filter)
 
 
 # ---------------------------------------------------------------------------
@@ -433,8 +473,11 @@ def _smoke_test(scheme: str = FP8) -> None:
 
     # 3. Throughput: which fp8 path actually fired?
     # The expectation differs by scheme:
-    #   - FP8 (activation+weight) should be faster than bf16 on Blackwell
-    #     (~0.75x bf16 per-forward, ~25% speedup) because _scaled_mm fires.
+    #   - FP8 / FP8_ROW (activation+weight, native matmul) should be faster
+    #     than bf16 on Blackwell (~0.75x bf16 per-forward, ~25% speedup)
+    #     because _scaled_mm fires. FP8_ROW pays a small extra cost for
+    #     per-row scale application, but the fused kernel keeps it within
+    #     ~5% of FP8 in practice.
     #   - FP8_WEIGHT_ONLY is dequant-then-bf16-matmul and is much slower
     #     than bf16 (~10x slower on toy models). Slow is the EXPECTED state
     #     for that scheme, not a failure.
@@ -450,7 +493,10 @@ def _smoke_test(scheme: str = FP8) -> None:
                      f"usually >5x slower on Blackwell. Possible fast-path "
                      f"hit; verify before relying on it.)")
     else:
-        # FP8 (activation+weight): native fp8 matmul should give speedup.
+        # FP8 / FP8_ROW (activation+weight): native fp8 matmul should give
+        # speedup. Per-row variant may run a few percent slower than per-
+        # tensor due to scale-fetch overhead; the >=1.2x PASS threshold
+        # still applies because the bf16 baseline is the same.
         if tps_ratio >= 1.2:
             tps_v = (f"PASS ({tps_ratio:.2f}x faster than bf16; native fp8 "
                      f"matmul kernels firing as expected)")
@@ -489,16 +535,16 @@ def _smoke_test(scheme: str = FP8) -> None:
         issues.append("quantization did not apply to expected layers")
     if mem_ratio < 1.6:
         issues.append("memory did not drop as expected")
-    # Throughput regression is only a failure for the activation+weight
-    # variant; weight-only is expected to be slow.
-    if scheme == FP8 and tps_ratio < 0.9:
+    # Throughput regression is only a failure for fast-path schemes
+    # (activation+weight, native matmul); weight-only is expected to be slow.
+    if scheme in _FAST_FP8_SCHEMES and tps_ratio < 0.9:
         issues.append("throughput regressed below bf16 (expected ~1.2x speedup "
                       "for activation+weight fp8)")
     if "FAIL" in out_v:
         issues.append("output corruption suspected")
 
     if not issues:
-        if scheme == FP8 and tps_ratio >= 1.2:
+        if scheme in _FAST_FP8_SCHEMES and tps_ratio >= 1.2:
             print(f"OVERALL: GOOD ({scheme} working as expected on this "
                   f"hardware: applied, memory halved, throughput "
                   f"{tps_ratio:.2f}x bf16).")

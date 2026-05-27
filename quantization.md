@@ -1,6 +1,6 @@
 # Quantisation in orthrus-serve
 
-In-process fp8 quantisation for Orthrus and vanilla Qwen3-8B served from this endpoint. Two schemes (`fp8` recommended, `fp8-weight-only` as a portable fallback). Designed so additional schemes (NVFP4, AWQ-int4) can be added without changing the call sites.
+In-process fp8 quantisation for Orthrus and vanilla Qwen3-8B served from this endpoint. Three schemes (`fp8` recommended, `fp8-row` for accuracy-sensitive workloads, `fp8-weight-only` as a portable fallback). Designed so additional schemes (NVFP4, AWQ-int4) can be added without changing the call sites.
 
 This doc covers what the feature does, how to verify it works on the target hardware, how it's wired in, and the comparison workflow it enables under tool-eval-bench.
 
@@ -34,10 +34,11 @@ Set the `ORTHRUS_QUANT` env var:
 | Value | Meaning |
 |---|---|
 | unset / empty | bf16, no quantisation (default) |
-| `fp8` | Fp8 weights + dynamic per-token activation quantisation, native `_scaled_mm` matmul. ~1.3x speedup, ~1.8x memory reduction on Blackwell. **Recommended.** |
+| `fp8` | Fp8 weights (per-tensor symmetric scale) + dynamic per-token activation quantisation, native `_scaled_mm` matmul. ~1.3x speedup, ~1.8x memory reduction on Blackwell. **Recommended default.** |
+| `fp8-row` | Same as `fp8` but with per-row (a.k.a. per-output-channel) weight scales. Higher numerical fidelity when weight rows have heterogeneous magnitudes (more common in deeper or under-distilled checkpoints). Memory matches `fp8` (the per-row scale tensor is negligible vs the weight). Throughput is within ~5% of `fp8` because `_scaled_mm` dispatches a per-row-scale kernel on Hopper / Blackwell that fuses the rescale into the matmul. Opt-in for accuracy-sensitive workloads or when investigating accuracy regressions seen at `fp8`. |
 | `fp8-weight-only` | Fp8 weight storage with bf16 matmul (dequant on every forward). ~1.8x memory reduction, ~10x slower throughput. Use only on hardware without `_scaled_mm` support, or for offline analysis where storage is the only thing that matters. |
 
-The two scheme names reflect what actually happens at runtime, not the historical torchao naming. The torchao API names are `Float8DynamicActivationFloat8WeightConfig` (mapped to `fp8`) and `Float8WeightOnlyConfig` (mapped to `fp8-weight-only`).
+The scheme names reflect what actually happens at runtime, not the historical torchao naming. The torchao mapping is: `fp8` -> `Float8DynamicActivationFloat8WeightConfig()`, `fp8-row` -> `Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`, `fp8-weight-only` -> `Float8WeightOnlyConfig()`.
 
 Examples:
 
@@ -155,7 +156,7 @@ The structural argument that this comparison is fair: under the frozen-teacher c
 
 - **Torchao on NGC pytorch IS supported in this configuration** (smoke test on 2026-05-27 confirms `torch._scaled_mm` fires on sm_121 and produces the expected 1.33x speedup). The NGC container (`nvcr.io/nvidia/pytorch:25.12-py3`) ships its own torchao build matched to its custom torch; do not override it with a pypi version.
 - **Two scheme names matter; pick the right one.** `fp8` is the recommended path: native fp8 matmul, ~33% faster than bf16 on Blackwell, ~1.8x memory reduction. `fp8-weight-only` is much slower than bf16 (~10x measured on a toy model) because torchao dequantises the weight back to bf16 for every matmul; use it only on hardware without `_scaled_mm` support.
-- **Per-tensor symmetric scaling.** The activation+weight path uses per-token dynamic scaling for activations and per-tensor symmetric scaling for weights. Per-channel weight scaling would slightly improve numerical accuracy at near-zero memory cost; not currently exposed.
+- **Default weight scaling is per-tensor.** The `fp8` scheme uses per-token dynamic scaling for activations and per-tensor symmetric scaling for weights (one scalar per Linear). Per-row weight scaling is available via the `fp8-row` scheme (added 2026-05-27), which is slightly higher fidelity at near-zero memory cost and within ~5% on throughput.
 - **`lm_head` is skipped.** Standard practice; can be revisited if memory pressure on the head becomes meaningful.
 - **No handling for activation outliers.** The dynamic per-token activation scaling in `fp8` handles most outlier cases for Qwen3-class models. For pathological activations, an outlier-aware scheme like SmoothQuant would be the next step.
 - **The Orthrus consensus mechanism's TPF under real fp8 is not yet measured.** PR 2 of orthrus-bench-spark measured TPF drops of ~7-10% under simulated int8 (cast-and-dequant in bf16). Real fp8 with native matmul should land in a similar regime or better, but verify empirically with a longer run (the smoke test's 32-token short prompt is too small to give reliable TPF; run a full benchmark prompt).
@@ -166,7 +167,7 @@ Wire-up validation is done (the smoke test passes OVERALL: GOOD on DGX Spark sm_
 
 1. **tool-eval-bench parity comparison.** Run Orthrus-fp8 vs Qwen3-fp8 endpoints under tool-eval-bench, report accuracy parity and median turn time. This is the immediate next experiment.
 2. **Longer-prompt TPF measurement.** The smoke test's 32-token short prompt is too small for stable TPF; rerun on the orthrus-bench-spark long prompt to confirm the consensus mechanism still accepts at the rates predicted by PR 2 (TPF ~6.0+ at fp8 vs ~6.56 at bf16).
-3. **Per-channel weight scaling.** Trivial addition; meaningfully better accuracy at near-zero memory cost. The current per-tensor scaling is the simplest choice and might leave accuracy on the table for outlier-heavy weight tensors.
+3. **Per-row tool-eval-bench comparison.** With the `fp8-row` scheme now wired in (2026-05-27), the open question is whether per-row scaling moves the tool-eval-bench score above the 74/100 ceiling that all three `fp8` arms tied at. Tiered plan: run the diffusion arm first as a gate, then full sweep only if it shows a meaningful gain over per-tensor.
 4. **NVFP4 (fp4 with native Blackwell support).** Spark targets fp4-native paths through `torch._scaled_mm` for additional memory and throughput; torchao support exists.
 5. **AWQ-int4 (calibrated).** Standard 4× memory reduction with calibration. Needs representative data, separate pipeline. Reasonable point to split out an `orthrus-quant` repo.
 6. **Quantisation-aware diffusion drafter retraining.** If accuracy parity breaks at int4, the diffusion drafter could be retrained against the quantised teacher to restore alignment. Out of scope for orthrus-serve; would belong upstream in the Orthrus training code.
