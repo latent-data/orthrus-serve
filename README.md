@@ -63,40 +63,11 @@ Two complementary surfaces:
 
 All numbers below are at revision `977a617` (post the `914faee` AR-fallback fix in upstream Orthrus). `enable_thinking=false` throughout.
 
-### tool-eval-bench (HTTP, 2026-05-25 sweep)
+### tool-eval-bench
 
-All three configurations against the same 69 scenarios at `--seed 42 --no-think`. Per-request serve INFO logs aggregated via `benchmarks/log_parse.py`.
+All three serving configurations against the same 69 scenarios at `--seed 42 --no-think`. The bf16 rows are from a 2026-05-25 baseline sweep; the fp8 rows are from a 2026-05-27 re-run after fp8 quantisation was wired in via `ORTHRUS_QUANT=fp8` (Float8DynamicActivationFloat8WeightConfig via torchao, native `_scaled_mm` on sm_121). Per-scenario / per-category / safety-critical-failure data for every row is in `benchmarks/results/tool-eval-bench/`; this section quotes the headline numbers and surfaces the cross-arm structure.
 
-| Configuration | Run summary | Final Score | Median Turn | Responsiveness |
-|---|---|---:|---:|---:|
-| Orthrus, diffusion on | `benchmarks/results/tool-eval-bench/2026-05-25T10-07-22Z_93a80c.md` | **72** | **2.0 s** | **65** |
-| Orthrus, no-diff (AR fallback) | `benchmarks/results/tool-eval-bench/2026-05-25T10-39-21Z_93a80c.md` | 70 | 4.4 s | 36 |
-| Qwen3-8B (base) | `benchmarks/results/tool-eval-bench/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 |
-
-**Per-request stats** (serve INFO logs):
-
-| Metric | Diffusion | No-diff | Base Qwen3 |
-|---|---:|---:|---:|
-| Requests logged | 154 | 152 | 152 |
-| Tool-call turns | 68 | 66 | 66 |
-| `completion_tokens` (median / mean / max) | 43.5 / 60.1 / 337 | 44 / 60.2 / 347 | 44 / 60.2 / 347 |
-| `total_s` (median / mean / max) | 1.96 / 2.33 / 11.77 | 4.42 / 6.05 / 32.91 | 4.43 / 6.06 / 32.97 |
-| `tok_per_s` (median / mean / max) | 24.8 / 27.3 / 74.6 | 9.84 / 9.67 / 10.62 | 9.81 / 9.65 / 10.59 |
-| Total generate wall-time | 359.5 s | 919.3 s | 921.0 s |
-
-**`tok_per_s` by completion-length bucket:**
-
-| Completion tokens | Diff n | Diff mean | No-diff n | No-diff mean | Base n | Base mean |
-|---|---:|---:|---:|---:|---:|---:|
-| < 10 | 3 | 8.5 | 2 | 5.5 | 2 | 5.4 |
-| 10-30 | 45 | 23.4 | 45 | 9.1 | 45 | 9.1 |
-| 30-100 | 84 | 27.9 | 82 | 9.9 | 82 | 9.9 |
-| 100-300 | 24 | 32.1 | 21 | 10.2 | 21 | 10.2 |
-| 300+ | 1 | 74.2 | 2 | 10.6 | 2 | 10.6 |
-
-### tool-eval-bench fp8 sweep (HTTP, 2026-05-27)
-
-Same 69 scenarios, same `--seed 42 --no-think`, same prompts as the May 25 bf16 sweep. Server started with `ORTHRUS_QUANT=fp8` (Float8DynamicActivationFloat8WeightConfig via torchao, native `_scaled_mm` on sm_121). Set up to validate the [orthrus-bench-spark PR 4 prediction](../orthrus-bench-spark/README.md#vanilla-qwen3-quantization-sensitivity-orthrus-is-not-uniquely-fragile-to-int8): "Orthrus inherits Qwen3's quantisation sensitivity, no more and no less."
+Setup intent: validate the [orthrus-bench-spark PR 4 prediction](../orthrus-bench-spark/README.md#vanilla-qwen3-quantization-sensitivity-orthrus-is-not-uniquely-fragile-to-int8): "Orthrus inherits Qwen3's quantisation sensitivity, no more and no less."
 
 | Configuration | Run summary | Final Score | Median Turn | Responsiveness | Deployability | Wall-clock |
 |---|---|---:|---:|---:|---:|---:|
@@ -107,7 +78,7 @@ Same 69 scenarios, same `--seed 42 --no-think`, same prompts as the May 25 bf16 
 | Qwen3-8B bf16 (May 25) | `benchmarks/results/tool-eval-bench/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 | 60 | 921.0 s |
 | **Qwen3-8B fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-21-32Z_f865fa.md` | **74** | **3.8 s** | **41** | **64** | **801.7 s** |
 
-Wall-clock totals: bf16 numbers come from the "Total generate wall-time" row in the May 25 per-request stats table above; fp8 numbers come from the tool-eval-bench `Completed in` line of each run's terminal output. Both reconcile against the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly.
+Wall-clock totals are derived from the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8, see "Long-form generation at fp8" below) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly.
 
 **Headline: all three configs tie at 74/100 (102/138 points) under fp8. Orthrus diffusion is 2.3× faster on median turn time than either AR-mode arm.** The 3-4× diffusion speedup over vanilla AR carries through fp8 cleanly; accuracy converges across all three arms.
 
@@ -170,12 +141,9 @@ Memory footprint also drops (per the smoke test in `quantization.md`): ~18.5 GB 
 
 ### Conclusions
 
-1. **No-diff Orthrus is indistinguishable from base Qwen3 on this workload.** Median `total_s` 4.42 vs 4.43, total wall-time 919.3 vs 921.0 (<0.2%), median `tok_per_s` 9.84 vs 9.81, identical Final Score and bucket throughputs to one decimal. Direct confirmation that the `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache — same code path as stock Qwen3.
-2. **Diffusion wins at every output-length bucket** including the very short acks (8.5 vs 5.5 tok/s). Both modes carry fixed per-request overhead, but diff's floor sits above no-diff's everywhere.
-3. **Completion-token distributions are essentially identical across modes** (median 43.5 / 44 / 44, max 337 / 347 / 347). Output identity (above) confirms this is text identity, not just length parity. The `StringStoppingCriteria` asymmetry — AR honours it, diffusion ignores it — is a known code-side issue but isn't affecting outputs here.
-4. **Diff is ~2.25× faster per turn than either AR config.** HTTP wrapper is not silently bypassing `use_diffusion_mode=False`; long-form HTTP numbers match in-process within 1%.
-5. **Diff and AR produce the same text where both complete; the 2-point Final Score gap is timeout-driven, not accuracy-driven.** AR's p90 11.87 s / 11.89 s and max ~33 s mean a handful of long-tail turns brush against tool-eval-bench's per-turn timeout, capping those scenario chains early. With unbounded wall-time the scores would match too.
-6. **At fp8, all three arms converge to identical 74/100 (102/138 points), with Orthrus diffusion 2.3× faster median turn time than either AR arm.** Orthrus no-diff and base Qwen3 are bit-identical (0 scenario differences across 69). Orthrus diffusion differs from each AR arm by exactly the same 2 trajectory-variance scenarios (TC-26, TC-49) that net to zero points. Same 4 safety-critical failures in all three arms. Direct empirical confirmation of orthrus-bench-spark PR 4: Orthrus inherits Qwen3's quantisation sensitivity, no unique amplification from the diffusion consensus mechanism. See the "tool-eval-bench fp8 sweep" subsection above.
+1. **No-diff Orthrus is indistinguishable from base Qwen3, at both bf16 and fp8.** At bf16 both arms score 70/138 (final score 70) with identical median turn time (4.4 s). At fp8 both arms are bit-identical scenario-by-scenario (both 102/138 = 74/100, 0 differences across 69 scenarios; final score 74). Same code path through the same weights at the same precision; greedy decoding gives the same output. The `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache, equivalent to stock Qwen3.
+2. **Diffusion is ~2.2× faster per turn than either AR config across both precisions.** Median turn 2.0 s vs 4.4 s at bf16, 1.7 s vs 3.8-3.9 s at fp8. The diffusion speedup carries through quantisation without weakening.
+3. **At fp8, all three arms converge to identical 74/100 (102/138 points).** Direct empirical confirmation of [orthrus-bench-spark PR 4](../orthrus-bench-spark/README.md#vanilla-qwen3-quantization-sensitivity-orthrus-is-not-uniquely-fragile-to-int8): Orthrus inherits Qwen3's quantisation sensitivity, no unique amplification from the diffusion consensus mechanism. Same 4 safety-critical failures in all three arms (TC-31, TC-34, TC-42, TC-43). See `benchmarks/results/tool-eval-bench/` for per-scenario data.
 
 ### Reproducing
 
