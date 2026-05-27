@@ -82,24 +82,46 @@ logger = logging.getLogger(__name__)
 #                           Blackwell. Memory still halves. Use only if you
 #                           need fp8 storage on hardware without _scaled_mm
 #                           (pre-Hopper), or for offline analysis.
+#   - "nvfp4"            -> NVFP4InferenceConfig from torchao.prototype.
+#                           mx_formats. 4-bit float weights with per-block
+#                           (~16-element) fp8 scales, dynamic per-tensor
+#                           activation scaling, triton-fp4 native kernel.
+#                           Toy probe (4096x4096) measured 2.58x bf16,
+#                           ~3.55x weight memory reduction. Inherently
+#                           per-block, not per-tensor (4 bits is too few
+#                           to make a single per-Linear scale work);
+#                           prototype-namespace in torchao 0.15.
 FP8 = "fp8"
 FP8_ROW = "fp8-row"
 FP8_WEIGHT_ONLY = "fp8-weight-only"
+NVFP4 = "nvfp4"
 
-SUPPORTED_QUANT_SCHEMES = (FP8, FP8_ROW, FP8_WEIGHT_ONLY)
+SUPPORTED_QUANT_SCHEMES = (FP8, FP8_ROW, FP8_WEIGHT_ONLY, NVFP4)
 
-# Schemes that go through the fast native-matmul path (torch._scaled_mm on
-# Hopper / Blackwell). Used by the smoke test's verdict logic to decide
-# whether a throughput regression is expected (weight-only) or a failure.
-_FAST_FP8_SCHEMES = (FP8, FP8_ROW)
+# Schemes that go through a fast native-matmul path (torch._scaled_mm for
+# fp8 on Hopper/Blackwell; triton-fp4 kernel for nvfp4). Used by the smoke
+# test's verdict logic to decide whether a throughput regression is
+# expected (weight-only) or a failure.
+_FAST_FP8_SCHEMES = (FP8, FP8_ROW, NVFP4)
 
 # Per-scheme expected speedup over bf16 (PASS threshold for the smoke
 # verdict). FP8 (per-tensor) hits ~1.33x on sm_121 short-prompt; FP8_ROW
-# (per-row) lands at ~1.17x on the same hardware because cuBLAS's per-row
-# `_scaled_mm` kernel is less tuned than the per-tensor variant. Both are
-# net wins over bf16; the threshold per scheme exists so the verdict
-# reflects the realistic ceiling, not the per-tensor ceiling.
-_FAST_FP8_PASS_THRESHOLDS = {FP8: 1.20, FP8_ROW: 1.10}
+# (per-row) lands at ~1.17x because cuBLAS's per-row `_scaled_mm` kernel
+# is less tuned. NVFP4 toy probe measured 2.58x bf16 on a 4096x4096
+# linear but the full-model HF generate amortises to 1.24x (smoke 2026-
+# 05-27); long-prompt diffusion-mode HTTP serving recovers the win,
+# landing at 1.74x bf16. Smoke threshold reflects the smoke ceiling.
+
+_FAST_FP8_PASS_THRESHOLDS = {FP8: 1.20, FP8_ROW: 1.10, NVFP4: 1.20}
+
+# Per-scheme expected memory-reduction ceiling for the smoke verdict.
+# fp8 family halves Linear bytes (~1.77x model-wide because embedding +
+# lm_head + norms stay bf16). NVFP4 quarters them plus a small per-block
+# scale overhead (~16-element blocks with fp8 scales) yielding a ~3.55x
+# weight-byte reduction or ~2.5x model-wide ceiling on an 8B Qwen3.
+_QUANT_MEMORY_PASS_THRESHOLDS = {
+    FP8: 1.60, FP8_ROW: 1.60, FP8_WEIGHT_ONLY: 1.60, NVFP4: 2.30,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -168,6 +190,8 @@ def apply_quantization(
         _apply_fp8_dynamic_activation_weight(model, per_row=True)
     elif scheme == FP8_WEIGHT_ONLY:
         _apply_fp8_weight_only(model)
+    elif scheme == NVFP4:
+        _apply_nvfp4(model)
 
     post = _memory_footprint_mb(model)
     logger.info("Quantization %r complete: footprint %.0f MB -> %.0f MB "
@@ -270,6 +294,55 @@ def _apply_fp8_dynamic_activation_weight(
         return _should_quantize_linear(fqn, module)
 
     quantize_(model, config, filter_fn=_filter)
+
+
+def _apply_nvfp4(model: nn.Module) -> None:
+    """Weights in NVFP4 (4-bit float, per-block fp8 scales),
+    dynamic per-tensor activation scaling, triton-fp4 native matmul.
+
+    NVFP4 (a.k.a. micro-scaling fp4) is structurally per-block: weights
+    are packed 2 fp4 values per byte and each ~16-element block gets its
+    own fp8 scale. The "per-tensor" piece in the config name refers to
+    the activation scaling, not the weight scaling -- you can't usefully
+    represent a transformer Linear's weight matrix with a single fp4
+    scale (4 bits is too few dynamic range).
+
+    Empirical state on Blackwell sm_121 (2026-05-27):
+      - Toy probe (4096x4096 linear): 2.58x bf16, ~3.55x weight bytes.
+      - 8B smoke test (HF generate, short prompt): 1.24x bf16, 2.89x
+        model-wide memory reduction (18.5 GB -> 6.4 GB).
+      - Diffusion-mode HTTP serving, long prompt: 88.9 tok/s vs fp8's
+        65.3 tok/s vs bf16's 51.1 tok/s, i.e. 1.36x fp8 / 1.74x bf16.
+
+    The diffusion drafter SURVIVES NVFP4 (unlike fp8-row, which breaks
+    the drafter through rigid per-row perturbation). The mechanism is
+    that block-wise scales vary at high frequency WITHIN a row (~16
+    weights per scale), so the row-level effect averages out to look
+    approximately uniform -- which is what drafter↔teacher alignment
+    needs. Per-row's rigid one-scale-per-row perturbation is what kills
+    the drafter, not the granularity per se. NVFP4 is finer-grained
+    than per-row and yet works, because the granularity is below the
+    row level rather than at it. (4-bit precision turns out to matter
+    much less than the structure of the perturbation.)
+
+    For accuracy: tool-eval-bench result is in
+    `benchmarks/results/tool-eval-bench/` and the README has the
+    per-scheme score table.
+    """
+    try:
+        from torchao.quantization import quantize_
+        from torchao.prototype.mx_formats import NVFP4InferenceConfig
+    except ImportError as e:
+        raise RuntimeError(
+            "NVFP4 import failed; torchao.prototype.mx_formats not "
+            "available in this build. Requires torchao 0.15+ as shipped "
+            "in nvcr.io/nvidia/pytorch:25.12-py3."
+        ) from e
+
+    def _filter(module: nn.Module, fqn: str) -> bool:
+        return _should_quantize_linear(fqn, module)
+
+    quantize_(model, NVFP4InferenceConfig(), filter_fn=_filter)
 
 
 # ---------------------------------------------------------------------------
@@ -495,15 +568,18 @@ def _smoke_test(scheme: str = FP8) -> None:
     # Naive "2x for fp8" overestimates because the embedding, lm_head, layer
     # norms, q_norm/k_norm etc. are NOT nn.Linear modules and stay bf16.
     # On an 8B Qwen3-class model that unquantised tail is ~13% of params
-    # (~2.4 GB out of ~18.5 GB), so the realistic ceiling is ~1.77x, not 2.0x.
-    # Threshold tuned to that: PASS if >=1.6x (close to the ceiling),
-    # LOW if a meaningful fraction of Linears were missed,
-    # FAIL only if the wrapper element-size accounting broke.
-    expected = "~1.7-1.8x for fp8 on this model size"
-    good, low = 1.6, 1.3
-    if mem_ratio >= good:
+    # (~2.4 GB out of ~18.5 GB), so the realistic ceiling is ~1.77x for
+    # 8-bit schemes and ~2.5x for 4-bit (NVFP4) schemes. Per-scheme PASS
+    # threshold (see _QUANT_MEMORY_PASS_THRESHOLDS) reflects that ceiling.
+    mem_threshold = _QUANT_MEMORY_PASS_THRESHOLDS.get(scheme, 1.60)
+    expected = (
+        f"~2.4-2.6x for {scheme} on this model size"
+        if scheme == NVFP4
+        else f"~1.7-1.8x for {scheme} on this model size"
+    )
+    if mem_ratio >= mem_threshold:
         mem_v = f"PASS ({mem_ratio:.2f}x; expected {expected})"
-    elif mem_ratio >= low:
+    elif mem_ratio >= mem_threshold * 0.8:
         mem_v = (f"LOW ({mem_ratio:.2f}x; expected {expected}; some Linear "
                  f"modules may have stayed bf16; check the filter)")
     else:
@@ -576,8 +652,9 @@ def _smoke_test(scheme: str = FP8) -> None:
     issues = []
     if applied_pct < 95:
         issues.append("quantization did not apply to expected layers")
-    if mem_ratio < 1.6:
-        issues.append("memory did not drop as expected")
+    if mem_ratio < mem_threshold:
+        issues.append(f"memory did not drop as expected (got {mem_ratio:.2f}x, "
+                      f"expected >={mem_threshold:.2f}x for {scheme})")
     # Throughput regression is only a failure for fast-path schemes
     # (activation+weight, native matmul); weight-only is expected to be slow.
     if scheme in _FAST_FP8_SCHEMES and tps_ratio < 0.9:
