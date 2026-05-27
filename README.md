@@ -262,17 +262,32 @@ The benchmarks above are specific to Orthrus-Qwen3-8B at 2026-05-27. The Qwen3 b
 
 ### What this study found that should generalise
 
-Measured drafter speedup (no-diff median turn / diffusion median turn on tool-eval-bench, sm_121, 2026-05-27):
+Measured median turn time on tool-eval-bench (sm_121, 2026-05-27). The baseline is bf16 no-diff = 4.4 s median (pure autoregressive single-token-at-a-time generation with no quantisation — the configuration you would get from any vanilla transformer serving stack with no Orthrus-specific work and no quantisation).
 
-| Scheme | Bits | Weight granularity | Drafter speedup | Ships? |
-|---|---|---|---:|---|
-| fp8 (per-tensor) | 8 | 1 scale / Linear | **2.29×** | Yes, recommended default |
-| nvfp4 (per-block) | 4 | 1 scale / ~16-element block | **1.86×** | Yes, alternative for memory pressure |
-| fp8-row (per-row) | 8 | 1 scale / output channel | **~1.0× (dead)** | No, drafter rejected |
+| Scheme | Bits | Weight granularity | nodiff median | diff median | Drafter only (nodiff/diff) | Total vs bf16-nodiff baseline (4.4/diff) |
+|---|---|---|---:|---:|---:|---:|
+| bf16 | 16 | n/a | 4.4 s | 2.0 s | **2.20×** | **2.20×** |
+| fp8 (per-tensor) | 8 | 1 scale / Linear | 3.9 s | 1.7 s | **2.29×** | **2.59×** |
+| nvfp4 (per-block) | 4 | 1 scale / ~16-elem block | 2.6 s | 1.4 s | **1.86×** | **3.14×** |
+| fp8-row (per-row) | 8 | 1 scale / output channel | ~3.6 s* | 3.6 s | **~1.0× (dead)** | **1.22×** |
+
+\* fp8-row no-diff median turn time was not directly measured on tool-eval-bench (we ran HTTP-bench instead, which showed nodiff_fp8_row at 16.6 / 16.3 tok/s — essentially identical to diffusion-mode fp8-row at 16.6 / 16.4 tok/s, confirming the drafter was rejected). The "~3.6 s" is an inference from that: if diff and nodiff give the same throughput, the drafter is contributing nothing.
+
+How to read the two right-most columns:
+
+- **Drafter only (nodiff / diff)**: at this same precision, how much does turning on the diffusion drafter speed you up? Isolates the drafter's contribution at that quant scheme. This is the column that exposes the "fp8-row breaks the drafter" finding (1.0× = drafter useless).
+- **Total vs bf16-nodiff baseline**: what's the end-to-end speedup of this configuration over the dumb baseline (a vanilla AR-fp32-style serving stack, here represented by bf16 no-diff)? This is the column that tells you what speedup the user actually gets if they pick this scheme. Stacks the diffusion speedup AND the quant speedup together.
+
+Two things become visible by looking at both columns together:
+
+1. **bf16-diffusion alone gives 2.20×** (the "free" speedup of choosing Orthrus over vanilla AR with no quantisation). fp8 on top adds 18% more (2.20 → 2.59). NVFP4 on top adds 43% more (2.20 → 3.14). The quant compounds with the drafter.
+2. **fp8-row loses the drafter completely** (1.0× in the drafter-only column) and ends up at 1.22× total — barely better than the vanilla-AR baseline, despite "having Orthrus" and "having a quant." The drafter is the load-bearing piece; killing it negates most of the deployment value.
 
 The predictive rule that emerges: **the drafter's accept rate is a continuous function of how uniform the weight perturbation looks at the row level.** Per-tensor is trivially uniform per row → drafter fully tracks. Per-block is locally non-uniform but averages out at the row scale → drafter partially tracks. Per-row is rigidly non-uniform at exactly the row scale → drafter cannot track.
 
-Crucially: **bit width matters much less than perturbation geometry.** NVFP4 is 4-bit yet drafter-friendly (1.86× speedup); fp8-row is 8-bit yet drafter-hostile (1.0× speedup). The drafter cares about relative-magnitude preservation across the weight matrix, not per-element rounding noise.
+Crucially: **bit width matters much less than perturbation geometry.** NVFP4 is 4-bit yet drafter-friendly (1.86× drafter-only speedup); fp8-row is 8-bit yet drafter-hostile (1.0× drafter-only speedup). The drafter cares about relative-magnitude preservation across the weight matrix, not per-element rounding noise.
+
+Shipping status for the orthrus-serve endpoint: fp8 is the recommended default (best accuracy + drafter intact), NVFP4 is the recommended alternative for memory or throughput priority (3-point accuracy cost + partial drafter speedup, but 38% less memory and 1.5× the bf16-baseline total speedup), fp8-row is contraindicated for diffusion-mode serving.
 
 ### What this means for the next Orthrus checkpoint
 
