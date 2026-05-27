@@ -1,6 +1,6 @@
 # tool-eval-bench run files
 
-Full per-scenario / per-category outputs from the tool-eval-bench sweeps cited in `orthrus-serve/README.md`. Filenames preserve the original tool-eval-bench `{ISO timestamp}_{hash}.md` convention so they can be cross-referenced against the spark-recipes archive at `~/spark-recipes/runs/2026/05/`.
+Full per-scenario / per-category outputs from the tool-eval-bench sweeps cited in `orthrus-serve/RESEARCH_LOG.md`. Filenames preserve the original tool-eval-bench `{ISO timestamp}_{hash}.md` convention so they can be cross-referenced against the spark-recipes archive at `~/spark-recipes/runs/2026/05/`.
 
 ## Index
 
@@ -18,11 +18,11 @@ Full per-scenario / per-category outputs from the tool-eval-bench sweeps cited i
 
 Note: the two Orthrus fp8 runs (diffusion and no-diff) share the same `Model (API)` field of `orthrus-qwen3-8b-fp8` because `served_model_id` includes the quant suffix but not the diffusion-mode flag. They're distinguished here by the median-turn-time and wall-clock columns above and (in the .md files themselves) by the `Run ID` timestamp.
 
-The fp8-row diffusion run scores 5 points below the fp8 diffusion run (69 vs 74) and is 2.1x slower per turn (3.6 vs 1.7 s). Both regressions trace to per-row quantisation breaking the diffusion drafter's alignment with the (now per-row-perturbed) teacher; see "Per-row fp8 breaks the diffusion drafter" in the top-level README and quantization.md.
+The fp8-row diffusion run scores 5 points below the fp8 diffusion run (69 vs 74) and is 2.1x slower per turn (3.6 vs 1.7 s). Both regressions trace to per-row quantisation breaking the diffusion drafter's alignment with the (now per-row-perturbed) teacher; see "Per-row fp8 breaks the diffusion drafter" in `quantization.md` and the corresponding section in `RESEARCH_LOG.md`.
 
 ## Source
 
-Each .md file is the verbatim output of `python -m tool_eval_bench ... > {Run ID}.md` per tool-eval-bench's `--out-dir` convention. The runs were executed against this repo's orthrus-serve endpoint on a DGX Spark (sm_121) at the dates shown. Reproducing instructions: see the `### Reproducing` section in the top-level orthrus-serve `README.md`.
+Each .md file is the verbatim output of `python -m tool_eval_bench ... > {Run ID}.md` per tool-eval-bench's `--out-dir` convention. The runs were executed against this repo's orthrus-serve endpoint on a DGX Spark (sm_121) at the dates shown. Reproducing instructions: see the `### Reproducing` section in `orthrus-serve/RESEARCH_LOG.md`.
 
 ## What's inside each file
 
