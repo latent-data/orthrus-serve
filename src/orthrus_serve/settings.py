@@ -25,7 +25,13 @@ class Settings:
 
     @property
     def served_model_id(self) -> str:
-        return "qwen3-8b" if self.base_model else "orthrus-qwen3-8b"
+        # Suffix with the quant scheme so that bf16 and fp8 runs of the same
+        # underlying model are distinguishable in client logs and bench output
+        # files. The suffix is only added when ORTHRUS_QUANT is set; default
+        # bf16 behaviour (no suffix) is preserved for back-compat with the
+        # May 25 baseline runs that recorded model="orthrus-qwen3-8b".
+        base = "qwen3-8b" if self.base_model else "orthrus-qwen3-8b"
+        return f"{base}-{self.quant}" if self.quant else base
 
     @classmethod
     def from_env(cls) -> Settings:
