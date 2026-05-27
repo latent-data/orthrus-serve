@@ -69,9 +69,9 @@ All three configurations against the same 69 scenarios at `--seed 42 --no-think`
 
 | Configuration | Run summary | Final Score | Median Turn | Responsiveness |
 |---|---|---:|---:|---:|
-| Orthrus, diffusion on | `~/spark-recipes/runs/2026/05/2026-05-25T10-07-22Z_93a80c.md` | **72** | **2.0 s** | **65** |
-| Orthrus, no-diff (AR fallback) | `~/spark-recipes/runs/2026/05/2026-05-25T10-39-21Z_93a80c.md` | 70 | 4.4 s | 36 |
-| Qwen3-8B (base) | `~/spark-recipes/runs/2026/05/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 |
+| Orthrus, diffusion on | `benchmarks/results/tool-eval-bench/2026-05-25T10-07-22Z_93a80c.md` | **72** | **2.0 s** | **65** |
+| Orthrus, no-diff (AR fallback) | `benchmarks/results/tool-eval-bench/2026-05-25T10-39-21Z_93a80c.md` | 70 | 4.4 s | 36 |
+| Qwen3-8B (base) | `benchmarks/results/tool-eval-bench/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 |
 
 **Per-request stats** (serve INFO logs):
 
@@ -100,12 +100,12 @@ Same 69 scenarios, same `--seed 42 --no-think`, same prompts as the May 25 bf16 
 
 | Configuration | Run summary | Final Score | Median Turn | Responsiveness | Deployability | Wall-clock |
 |---|---|---:|---:|---:|---:|---:|
-| Orthrus diffusion bf16 (May 25) | `~/spark-recipes/runs/2026/05/2026-05-25T10-07-22Z_93a80c.md` | 72 | 2.0 s | 65 | 70 | 359.5 s |
-| **Orthrus diffusion fp8** | `~/spark-recipes/runs/2026/05/2026-05-27T11-01-43Z_a24531.md` | **74** | **1.7 s** | **70** | **73** | **331.0 s** |
-| Orthrus no-diff bf16 (May 25) | `~/spark-recipes/runs/2026/05/2026-05-25T10-39-21Z_93a80c.md` | 70 | 4.4 s | 36 | 60 | 919.3 s |
-| **Orthrus no-diff fp8** | `~/spark-recipes/runs/2026/05/2026-05-27T11-48-43Z_a24531.md` | **74** | **3.9 s** | **41** | **64** | **810.2 s** |
-| Qwen3-8B bf16 (May 25) | `~/spark-recipes/runs/2026/05/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 | 60 | 921.0 s |
-| **Qwen3-8B fp8** | `~/spark-recipes/runs/2026/05/2026-05-27T11-21-32Z_f865fa.md` | **74** | **3.8 s** | **41** | **64** | **801.7 s** |
+| Orthrus diffusion bf16 (May 25) | `benchmarks/results/tool-eval-bench/2026-05-25T10-07-22Z_93a80c.md` | 72 | 2.0 s | 65 | 70 | 359.5 s |
+| **Orthrus diffusion fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-01-43Z_a24531.md` | **74** | **1.7 s** | **70** | **73** | **331.0 s** |
+| Orthrus no-diff bf16 (May 25) | `benchmarks/results/tool-eval-bench/2026-05-25T10-39-21Z_93a80c.md` | 70 | 4.4 s | 36 | 60 | 919.3 s |
+| **Orthrus no-diff fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-48-43Z_a24531.md` | **74** | **3.9 s** | **41** | **64** | **810.2 s** |
+| Qwen3-8B bf16 (May 25) | `benchmarks/results/tool-eval-bench/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 | 60 | 921.0 s |
+| **Qwen3-8B fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-21-32Z_f865fa.md` | **74** | **3.8 s** | **41** | **64** | **801.7 s** |
 
 Wall-clock totals: bf16 numbers come from the "Total generate wall-time" row in the May 25 per-request stats table above; fp8 numbers come from the tool-eval-bench `Completed in` line of each run's terminal output. Both reconcile against the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly.
 

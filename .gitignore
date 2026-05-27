@@ -9,4 +9,3 @@ build/
 .mypy_cache/
 .ruff_cache/
 *.so
-benchmarks/results/
