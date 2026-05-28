@@ -104,6 +104,8 @@ Expected verdict block (measured on DGX Spark sm_121, 2026-05-27, Orthrus diffus
 OVERALL: GOOD (fp8 working as expected on this hardware: applied, memory halved, throughput 1.33x bf16).
 ```
 
+The smoke-test figures quoted in this doc (the 1.33x throughput / 28.0 vs 21.1 tok/s, the per-row 24.8 tok/s, and the ~18.5 / 10.4 / 6.4 GB memory footprints) are point measurements printed to stdout by this verdict block; they are not captured as committed artifacts. Only the full-prompt benchmark numbers in `benchmarks/results/` are reproducible from the repo. Treat the smoke-test numbers as one-off sanity readings, not load-bearing measurements.
+
 If any of the four lines come back as FAIL or REGRESSION, the wire-up or the hardware is the place to look. The diagnostic distinguishes:
 
 - **Quantization applied** counts how many `nn.Linear` weights are wrapped in `Float8Tensor` (torchao's tensor subclass with `.qdata` pointing at the fp8 storage). The wrapper reports its `.dtype` as `bfloat16` for transparency; the diagnostic looks past that to detect the wrapper.
@@ -159,7 +161,7 @@ HTTP throughput (`benchmarks/results/results_http.json`), diffusion-mode long pr
 |---|---:|---:|---:|---:|
 | bf16 | 38.8 | 51.1 | 10.9 | 4.7× |
 | fp8 (per-tensor) | 43.5 | 65.3 | 14.0 | 4.7× |
-| **fp8-row (per-row)** | **47.5** | **78.6** | 16.1 | **4.9×** |
+| **fp8-row (per-row)** | **47.5** | **78.6** | 16.3 | **4.8×** |
 | nvfp4 (per-block) | 47.3 | 88.9 | — | drafter intact (1.4 s median turn) |
 
 The diffusion arm runs **3-5× faster than the AR floor under every scheme** — the unambiguous signature of an active drafter. Per-row is in fact the fastest 8-bit scheme on long-form generation (78.6 tok/s, above per-tensor fp8's 65.3), because its kernel path and accept rate are both healthy on sm_121.
