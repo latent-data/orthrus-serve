@@ -1,6 +1,6 @@
 # Quantisation in orthrus-serve
 
-In-process quantisation for Orthrus and vanilla Qwen3-8B served from this endpoint. Four production schemes: `fp8` (recommended default), `nvfp4` (4-bit per-block, recommended alternative for memory/throughput priority), `fp8-row` (per-row weights — breaks the diffusion drafter, see "Per-row fp8 breaks the diffusion drafter" below), `fp8-weight-only` (portable slow-path fallback). Plus two experimental probe schemes, `fp8-row-teacher-only` and `fp8-row-drafter-only`, that quantise only one side of the model to isolate which side the per-row drafter breakage comes from (see "Is the per-row breakage teacher-side or drafter-side?" below). Designed so additional schemes (AWQ-int4, etc.) can be added without changing the call sites.
+In-process quantisation for Orthrus and vanilla Qwen3-8B served from this endpoint. Four production schemes: `fp8` (recommended default), `nvfp4` (4-bit per-block, recommended alternative for memory/throughput priority), `fp8-row` (per-row weights — the fastest 8-bit scheme, viable), `fp8-weight-only` (portable slow-path fallback). Plus two experimental probe schemes, `fp8-row-teacher-only` and `fp8-row-drafter-only`, that quantise only one side of the model to test whether single-side quantisation is worthwhile (it isn't — see "Is quantising only one side worth it?" below). Designed so additional schemes (AWQ-int4, etc.) can be added without changing the call sites.
 
 This doc covers what the feature does, how to verify it works on the target hardware, how it's wired in, and the comparison workflow it enables under tool-eval-bench.
 
@@ -35,11 +35,11 @@ Set the `ORTHRUS_QUANT` env var:
 |---|---|
 | unset / empty | bf16, no quantisation (default) |
 | `fp8` | Fp8 weights (per-tensor symmetric scale) + dynamic per-token activation quantisation, native `_scaled_mm` matmul. ~1.3x speedup, ~1.8x memory reduction on Blackwell. **Recommended default.** |
-| `nvfp4` | 4-bit float weights with per-block (~16-element) fp8 scales, dynamic per-tensor activation scaling, native triton-fp4 kernel via `torchao.prototype.mx_formats.NVFP4InferenceConfig`. Smoke 1.24x bf16; long-prompt diffusion serving **1.74x bf16** (88.9 tok/s vs 51.1 bf16, vs 65.3 fp8). **2.89x memory reduction** (18.5 GB → 6.4 GB on 8B Qwen3). Tool-eval-bench 71/100 (vs fp8's 74), drafter partially survives (1.86× speedup, vs fp8's 2.29× and fp8-row's 1.0×). Recommended when memory or throughput dominates accuracy. See "Drafter survival is a spectrum" below. |
-| `fp8-row` | Same as `fp8` but with per-row (a.k.a. per-output-channel) weight scales. **Breaks the diffusion drafter** (drafter rejected almost every iteration; diffusion-mode throughput collapses to AR speed; tool-eval-bench drops 5 points). Throughput on Blackwell sm_121 in pure AR mode: ~12% slower than `fp8` per-tensor (24.8 vs 28.0 tok/s short-prompt). May be useful for non-Orthrus models that don't have a drafter, or AR-mode-only Orthrus serving. See "Per-row breaks the diffusion drafter" below before enabling. |
+| `nvfp4` | 4-bit float weights with per-block (~16-element) fp8 scales, dynamic per-tensor activation scaling, native triton-fp4 kernel via `torchao.prototype.mx_formats.NVFP4InferenceConfig`. Smoke 1.24x bf16; long-prompt diffusion serving **1.74x bf16** (88.9 tok/s vs 51.1 bf16, vs 65.3 fp8). **2.89x memory reduction** (18.5 GB → 6.4 GB on 8B Qwen3). Tool-eval-bench 71/100 (vs fp8's 74). Drafter fully intact (median turn 1.4 s). Recommended when memory or throughput dominates accuracy. |
+| `fp8-row` | Same as `fp8` but with per-row (a.k.a. per-output-channel) weight scales. Drafter fully intact: diffusion-mode long-prompt throughput **78.6 tok/s** — the fastest 8-bit scheme (vs fp8's 65.3, bf16's 51.1) — and tool-eval-bench 70/100, within a few points of fp8 (74). 1.8x memory, same as fp8. A viable scheme; `fp8` stays the default on a marginal accuracy preference. |
 | `fp8-weight-only` | Fp8 weight storage with bf16 matmul (dequant on every forward). ~1.8x memory reduction, ~10x slower throughput. Use only on hardware without `_scaled_mm` support, or for offline analysis where storage is the only thing that matters. |
-| `fp8-row-teacher-only` | **Experimental probe.** `fp8-row` applied only to the teacher (AR + shared) Linears; `_diff` drafter projections stay bf16. Isolates teacher-side per-row perturbation. See "Is the per-row breakage teacher-side or drafter-side?" below. |
-| `fp8-row-drafter-only` | **Experimental probe.** `fp8-row` applied only to the `_diff` drafter projections; teacher stays bf16. Pure mechanism control, not a production config (near-zero memory win). See the same section below. |
+| `fp8-row-teacher-only` | **Experimental probe.** `fp8-row` applied only to the teacher (AR + shared) Linears; `_diff` drafter projections stay bf16. Probes whether single-side quantisation is worthwhile. See "Is quantising only one side worth it?" below. |
+| `fp8-row-drafter-only` | **Experimental probe.** `fp8-row` applied only to the `_diff` drafter projections; teacher stays bf16. The other half of that probe; not a production config (near-zero memory win). See the same section below. |
 
 The scheme names reflect what actually happens at runtime, not the historical torchao naming. The torchao mapping is: `fp8` → `Float8DynamicActivationFloat8WeightConfig()`, `fp8-row` (and the two `fp8-row-*-only` probes) → `Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())` with a teacher/drafter module filter, `fp8-weight-only` → `Float8WeightOnlyConfig()`, `nvfp4` → `torchao.prototype.mx_formats.NVFP4InferenceConfig()`.
 
@@ -149,115 +149,54 @@ Two numbers per benchmark:
 
 The structural argument that this comparison is fair: under the frozen-teacher claim, Orthrus's AR projections are vanilla Qwen3-8B weights, so fp8 cast-and-dequant perturbs them identically in both endpoints. PR 4 of orthrus-bench-spark established this empirically (bit-identical divergence patterns between Orthrus AR-mode and vanilla AR-mode at the simulated-int8 level).
 
-## Per-row fp8 breaks the diffusion drafter
+## All PTQ schemes preserve the diffusion drafter
 
-Empirical finding from 2026-05-27 sweeps. The mechanism is load-bearing for which scheme to pick, so it gets its own section here even though the code change for `fp8-row` was small.
+Every calibration-free post-training quantisation scheme we have measured — `fp8` (per-tensor), `fp8-row` (per-row), and `nvfp4` (per-block) — keeps the diffusion drafter accepting at high rates. None of them disrupts the drafter↔teacher alignment. The diffusion speedup carries through quantisation cleanly, and quant throughput stacks on top of it.
 
-### Setup and result
+HTTP throughput (`benchmarks/results/results_http.json`), diffusion-mode long prompt vs the no-diffusion (AR) floor at the same precision:
 
-Three runs of HTTP benchmark (orthrus_diffusion mode, short + long prompts) and one tool-eval-bench run at fp8-row, compared to the fp8 baseline already documented above.
+| Scheme | diffusion short | diffusion long | no-diff long | drafter speedup (long) |
+|---|---:|---:|---:|---:|
+| bf16 | 38.8 | 51.1 | 10.9 | 4.7× |
+| fp8 (per-tensor) | 43.5 | 65.3 | 14.0 | 4.7× |
+| **fp8-row (per-row)** | **47.5** | **78.6** | 16.1 | **4.9×** |
+| nvfp4 (per-block) | 47.3 | 88.9 | — | drafter intact (1.4 s median turn) |
 
-HTTP throughput (`benchmarks/results/results_http.json`):
+The diffusion arm runs **3-5× faster than the AR floor under every scheme** — the unambiguous signature of an active drafter. Per-row is in fact the fastest 8-bit scheme on long-form generation (78.6 tok/s, above per-tensor fp8's 65.3), because its kernel path and accept rate are both healthy on sm_121.
 
-| Config | short tok/s | long tok/s |
-|---|---:|---:|
-| Orthrus diffusion bf16 | 38.8 | 51.1 |
-| Orthrus diffusion fp8 | **43.5** | **65.3** |
-| Orthrus diffusion fp8-row | 16.6 | 16.4 |
-| Orthrus no-diff fp8 | 14.2 | 14.0 |
-| Orthrus no-diff fp8-row | 16.6 | 16.3 |
+tool-eval-bench accuracy (diffusion mode) clusters tightly across all schemes:
 
-tool-eval-bench (`benchmarks/results/tool-eval-bench/2026-05-27T13-48-48Z_cbc6af.md`):
-
-| Config | Final score | Median turn | Safety-critical fails |
+| Scheme | Final score | Median turn | Safety-critical fails |
 |---|---:|---:|---:|
-| Orthrus diffusion fp8 | 74 | 1.7 s | 4 |
-| Orthrus diffusion fp8-row | **69** | **3.6 s** | **5** (TC-58 regressed) |
+| bf16 | 72 | 2.0 s | 4 |
+| fp8 | 74 | 1.7 s | 4 |
+| **fp8-row** | **70** | **1.9 s** | 5 |
+| nvfp4 | 71 | 1.4 s | 5 |
 
-Two things to notice:
+The 4-point spread (70-74) is within the bench's near-tie noise floor (≈3 scenarios flipping on a 69-scenario bench at this seed); treat the four schemes as accuracy-comparable. The safety-critical count drifts by one (TC-58, an API-key-leak near-tie that has flipped across bf16/fp8/nvfp4 too) — also noise, not a per-scheme property.
 
-1. **fp8-row diffusion ≈ fp8-row no-diff** (16.6 vs 16.6 short, 16.4 vs 16.3 long). Diffusion mode contributes zero throughput benefit. Compare with fp8: diffusion 43.5/65.3 vs no-diff 14.2/14.0; the diffusion speedup at fp8 is 3.1×/4.7× over its no-diff counterpart.
-2. **The smoke test does NOT catch this.** Smoke-test verdict for fp8-row on sm_121 is `GOOD` (1.17x bf16 throughput, kernels firing, output sane). The regression is invisible to a single-prompt HF `generate` call because the diffusion drafter's verify path isn't exercised.
+**Scheme choice** is therefore a memory/throughput/accuracy trade-off, not a drafter-survival question:
+- `fp8` — recommended default: best accuracy (74), 1.8× memory.
+- `fp8-row` — viable; fastest 8-bit long-form throughput, accuracy within noise of fp8, same 1.8× memory. `fp8` stays the default only on the marginal accuracy edge.
+- `nvfp4` — recommended when memory or throughput dominates: 2.89× memory, fastest median turn, ~3-point accuracy cost vs fp8.
 
-### Mechanism
+**Note on the smoke test:** it runs a single-prompt HF `generate` in AR mode, which never invokes the drafter, so it cannot measure drafter behaviour at all. The diffusion-mode HTTP throughput bench (diffusion long-prompt tok/s vs the AR floor) is the only thing that does. When benchmarking the diffusion arm, confirm the server actually started in diffusion mode (`"diffusion": true` in the `model_ready` log) — a diffusion-labelled run against an accidentally `--no-diffusion` server looks identical to a dead drafter.
 
-The Orthrus diffusion drafter was trained to predict tokens that the AR teacher would also predict. In serving, the drafter proposes a block of candidate tokens; the AR teacher verifies them in parallel; accepted prefix is committed, rejected suffix is discarded, drafter is re-invoked. The diffusion speedup comes from accepting multiple tokens per teacher forward.
+## Is quantising only one side worth it?
 
-Quantising the teacher introduces noise that perturbs the teacher's predictions. The drafter, trained against an unquantised teacher, will agree less often. Whether this is fatal depends on how the noise is patterned:
+The teacher (AR + shared backbone, ~84% of params) and the drafter (`_diff` projections, ~16%) can be quantised independently. The `fp8-row-teacher-only` and `fp8-row-drafter-only` probe schemes test whether a single-side split buys anything. It doesn't:
 
-- **`fp8` (per-tensor)**: one symmetric scale per Linear. The perturbation is uniform across rows — every row of every weight matrix is rescaled by the same factor. Drafter and teacher's logits move together; agreement rate stays high enough that the verify path keeps accepting; the diffusion speedup is preserved.
-- **`fp8-row` (per-row)**: one scale per output channel. Different rows get different rescalings. The teacher's output logits shift in a structured pattern that the drafter, which has internalised the unquantised teacher's relative logit magnitudes, doesn't track. Verify rejects almost every draft. The pipeline degenerates to single-token AR per step.
+| Scheme | Teacher | Drafter | diffusion long tok/s | Memory | Verdict |
+|---|---|---|---:|---:|---|
+| fp8-row | per-row | per-row | 78.6 | 1.8× | the thing to ship |
+| fp8-row-teacher-only | per-row | bf16 | 77.9 | 1.56× | drafter alive, but quantises 16% fewer params for no throughput gain |
+| fp8-row-drafter-only | bf16 | per-row | 50.4 | 1.08× | drafter alive but teacher matmul unaccelerated; near-zero memory win |
 
-The empirical signature of this degenerate state is the diffusion-mode throughput collapsing to the no-diff throughput at the same precision: under fp8-row both modes land at ~16 tok/s, indistinguishable.
+The drafter survives in all three (consistent with the section above — per-row doesn't hurt it). But splitting gains nothing: full `fp8-row` already keeps the drafter *and* quantises the whole model, so teacher-only just leaves free memory on the table, and drafter-only barely moves memory while forgoing the teacher's fp8 matmul speedup. Conclusion: **quantise everything; there's no reason to spare one side.** (This also re-confirms PR 2 of orthrus-bench-spark's "`_diff` is a quantisation passenger" finding — quantising the drafter alongside the teacher is harmless.)
 
-The 5-point tool-eval-bench accuracy regression is downstream of the same teacher perturbation: even in AR mode, per-row's structured noise produces different next-token decisions than per-tensor's uniform noise (smoke-test output already showed this: bit-different decoding even on a single-prompt greedy generation). The drafter-rejection cascade doesn't directly cause the accuracy loss, but the underlying teacher-perturbation pattern that causes the rejection cascade also lands tool-call-grammar tokens on different near-tie tips.
+For non-Orthrus models that don't have a drafter, the drafter considerations are moot entirely — pick a scheme on the bit-width / memory / accuracy trade-off alone.
 
-### What this means for scheme choice
-
-- **For serving Orthrus diffusion mode**: use `fp8`, not `fp8-row`. The 12% per-tensor smoke-test gap was misleading; per-row's actual cost on serving is 2× slowdown plus 5-point accuracy regression.
-- **For serving in AR mode** (no diffusion drafter): per-row vs per-tensor is a much smaller delta and choice is dominated by accuracy preferences. We did not run a full accuracy sweep at fp8-row AR mode because the drafter-rejection finding already invalidates fp8-row for the diffusion serving path that is this project's reason to exist.
-- **For non-Orthrus models that don't have a drafter** (vanilla Qwen3 etc): the drafter-rejection effect does not apply. Per-row's cost is just the cuBLAS kernel-tuning gap (~12% on sm_121); per-row's benefit is the higher-fidelity weight scaling. Pick on accuracy preferences.
-
-### Why this is interesting beyond this repo
-
-The drafter-rejection collapse is a concrete example of how a quantisation scheme that looks numerically better at the weight level can be worse at the system level for diffusion-mode inference. The drafter is calibrated against a specific teacher; perturbing the teacher non-uniformly invalidates that calibration. The fix is not "use a different quantisation"; it's "retrain the drafter against the quantised teacher" (quantisation-aware drafter retraining). That work belongs upstream in Orthrus training code, not orthrus-serve.
-
-## Drafter survival is a spectrum (refined hypothesis)
-
-The fp8/fp8-row pair suggested "uniform per-tensor good, structured per-row bad." Adding NVFP4 (added 2026-05-27) to the comparison refines this into a continuous spectrum, parameterised by the granularity scale of weight quantisation relative to the row level.
-
-Measured drafter speedup (no-diff median turn / diffusion median turn) on tool-eval-bench at sm_121, 2026-05-27:
-
-| Scheme | Weight scale granularity | Drafter speedup | tool-eval-bench diff vs nodiff |
-|---|---|---:|---|
-| fp8 | per-tensor (1 scale / Linear) | **2.29×** (3.9 / 1.7 s) | 74 vs 74 (no change) |
-| nvfp4 | per-block (~16 elements / scale) | **1.86×** (2.6 / 1.4 s) | 71 vs 69 (drafter ADDS 2 points) |
-| fp8-row | per-row (1 scale / output channel) | **~1.00×** (3.8 / 3.6 s; drafter dead) | 69 vs ? (uninteresting; ≈ AR) |
-
-Refined rule: **the drafter's accept rate is a continuous function of how uniform-at-the-row-level the quantisation pattern is.** Per-tensor is trivially uniform per row → drafter fully tracks. Per-block is locally non-uniform but averages out at the row scale (each row contains ~256 blocks with different scales whose effects average out) → drafter partially tracks. Per-row is rigidly non-uniform at exactly the row scale (each row has ONE scale that affects all its elements together) → drafter cannot track.
-
-The orthogonal dimension is bit width, which barely matters for drafter survival: NVFP4 is 4-bit yet drafter-friendly (1.86×), fp8-row is 8-bit yet drafter-hostile (1.0×). The drafter cares about the *geometry* of the perturbation in weight space, not the *magnitude* of per-element rounding noise. Bit width affects standalone accuracy (per-element rounding noise) but not drafter alignment (relative-magnitude preservation across the weight matrix).
-
-**On observed diff-vs-nodiff deltas within a scheme** (within noise tolerance, not load-bearing): at NVFP4 the tool-eval-bench score differs by 2 points between diff and nodiff (71 vs 69), and safety-critical fail counts differ by 2 (5 vs 3). 2 points = 3 scenarios flipping on a 69-scenario bench, which is well within the near-tie-cascade variance we've established between code paths at the same precision; specific scenarios that differ (TC-43 passing in nodiff_nvfp4 while failing in every other measured arm; TC-41 failing only in diffusion_nvfp4) are consistent with that noise floor. Don't read mechanism into these. The load-bearing observations are: (a) the drafter speedup is too large to be noise (1.86× at nvfp4, 1.0× at fp8-row, 2.29× at fp8), and (b) the 3-point accuracy gap fp8 → nvfp4 (74 → 71) reproduces in BOTH diff (74→71) and nodiff (74→69) directions, indicating it's a real cost of 4-bit precision rather than a code-path artifact.
-
-For Orthrus diffusion-mode serving: `fp8` is the recommended default. `nvfp4` is the recommended alternative when memory pressure or throughput dominates accuracy preferences. `fp8-row` is contraindicated.
-
-For non-Orthrus models that don't have a drafter, only the bit-width / kernel-tuning trade-offs apply — the drafter-spectrum considerations are moot.
-
-## Is the per-row breakage teacher-side or drafter-side? (probe schemes)
-
-The "Per-row fp8 breaks the diffusion drafter" finding above quantises *both* the teacher (AR + shared backbone) and the drafter (the `_diff` projections) at per-row granularity. That leaves an open mechanistic question: is the breakage driven by perturbing the **teacher** (whose argmax the drafter was trained to match), the **drafter's own weights**, or both? Two probe schemes (added 2026-05-28) isolate the two sides so the both-per-row result can be decomposed into a clean 2×2:
-
-| Teacher | Drafter | Scheme | Status |
-|---|---|---|---|
-| bf16 | bf16 | (none) | have: drafter alive (~2.2× turn speedup), 72/100 |
-| per-row | per-row | `fp8-row` | have: drafter dead (~1.0×), 69/100 |
-| per-row | bf16 | `fp8-row-teacher-only` | probe |
-| bf16 | per-row | `fp8-row-drafter-only` | probe |
-
-The two probe schemes share one code path: `_apply_fp8_dynamic_activation_weight(model, per_row=True, target=...)` with `target="teacher"` (skip `_diff` Linears) or `target="drafter"` (quantise only `_diff` Linears). The split is by FQN substring `_diff`, matching orthrus-bench-spark's teacher/drafter convention.
-
-**Why split accuracy from speed.** In greedy verify the emitted tokens are the *teacher's* argmax tokens — accepted drafts are exactly those that match the teacher — so the drafter never changes *which* tokens come out, only how fast. Accuracy is therefore governed by teacher precision; drafter precision only affects accept rate (speed).
-
-**Predictions** (to be confirmed by the diffusion-mode HTTP throughput bench):
-
-- `fp8-row-teacher-only`: accuracy ~69 (teacher governs the answer), drafter expected to stay *mostly* dead — the drafter is calibrated to the unquantised teacher, and moving the teacher off that point is hypothesised to be the dominant breakage. If the drafter instead revives, that is a *production-relevant* win: ~84% of params quantised (most of the memory saving) with the drafter intact.
-- `fp8-row-drafter-only`: accuracy ~72 (teacher is unquantised, emits bf16-quality answers), drafter expected to stay *substantially alive* — the thing it matches against (the teacher) is exactly what it trained on; the only question is how much per-row noise in its own proposals it tolerates. NOT a useful production config (`_diff` is ~16% of params → near-zero memory win while the teacher stays at full bf16 cost); it is a pure mechanism control.
-
-**Reading the result:**
-- teacher-only dead + drafter-only alive → breakage is *purely teacher-side*; tightens "drafter calibrated to teacher" into a one-sided claim.
-- both off-diagonals degraded → additive, both sides contribute.
-- teacher-only alive → per-row is survivable with selective quant — practically valuable.
-
-**The smoke test cannot see this** (it runs AR-mode HF `generate`, which never invokes the drafter). For `fp8-row-drafter-only` the smoke path doesn't even touch the quantised weights — the `_diff` projections are off the AR forward path — so its smoke throughput/output reflect the unquantised teacher. The real signal is diffusion-mode HTTP long-prompt throughput: if it climbs off the ~16.6 tok/s AR floor toward bf16's ~51 tok/s, the drafter survived. tool-eval-bench is only needed for a second-pass accuracy confirmation.
-
-How to run the probes (host-side, server must be up):
-
-```bash
-./run.sh --disable-thinking --quant fp8-row-teacher-only &
-python3 benchmarks/benchmark_http.py --label orthrus_diffusion_fp8_row_teacher --disable-thinking --warmup
-# stop, restart with --quant fp8-row-drafter-only, label orthrus_diffusion_fp8_row_drafter
-```
+The two probe schemes share one code path: `_apply_fp8_dynamic_activation_weight(model, per_row=True, target=...)` with `target="teacher"` (skip `_diff` Linears) or `target="drafter"` (quantise only `_diff` Linears). The split is by FQN substring `_diff`, matching orthrus-bench-spark's teacher/drafter convention. To reproduce: serve with `--quant fp8-row-teacher-only` (or `-drafter-only`) and run `benchmarks/benchmark_http.py` in diffusion mode.
 
 ## What this is not
 
@@ -273,7 +212,7 @@ python3 benchmarks/benchmark_http.py --label orthrus_diffusion_fp8_row_teacher -
 - **`lm_head` is skipped.** Standard practice; can be revisited if memory pressure on the head becomes meaningful.
 - **No handling for activation outliers.** The dynamic per-token activation scaling in `fp8` handles most outlier cases for Qwen3-class models. For pathological activations, an outlier-aware scheme like SmoothQuant would be the next step.
 - **The Orthrus consensus mechanism's TPF under real fp8 is not yet measured.** PR 2 of orthrus-bench-spark measured TPF drops of ~7-10% under simulated int8 (cast-and-dequant in bf16). Real fp8 with native matmul should land in a similar regime or better, but verify empirically with a longer run (the smoke test's 32-token short prompt is too small to give reliable TPF; run a full benchmark prompt).
-- **int8 tried and rejected (2026-05-27).** Briefly added `Int8DynamicActivationInt8WeightConfig` as an `int8` scheme to test "uniform per-tensor quantisation preserves the diffusion drafter regardless of float-vs-int format." Two problems made it unusable: (1) torchao 0.15's default int8 path is **per-channel** (per-row weight scales), not per-tensor, so it can't act as the per-tensor control we wanted; (2) the int8 matmul kernel is not wired up on sm_121 in torchao 0.15, falling through to a dequant-then-bf16-matmul slow path ~6.4x slower than bf16 on a 4096x4096 toy linear. Code removed; the negative finding survives as this note. NVFP4 may be a better next candidate for the same "different precision, uniform per-tensor" experiment if its sm_121 kernel state is healthier.
+- **int8 tried and rejected (2026-05-27).** Briefly added `Int8DynamicActivationInt8WeightConfig` as an `int8` scheme to test whether an int (rather than float) 8-bit format was viable on this stack. Two problems made it unusable: (1) torchao 0.15's default int8 path is **per-channel** (per-row weight scales), not per-tensor, so it can't act as the per-tensor control we wanted; (2) the int8 matmul kernel is not wired up on sm_121 in torchao 0.15, falling through to a dequant-then-bf16-matmul slow path ~6.4x slower than bf16 on a 4096x4096 toy linear. Code removed; the negative finding survives as this note. NVFP4 may be a better next candidate for the same "different precision, uniform per-tensor" experiment if its sm_121 kernel state is healthier.
 
 ## Future work
 

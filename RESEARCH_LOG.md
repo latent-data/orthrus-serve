@@ -25,11 +25,11 @@ Setup intent: validate the [orthrus-bench-spark PR 4 prediction](../orthrus-benc
 | **Orthrus no-diff fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-48-43Z_a24531.md` | **74** | **3.9 s** | **41** | **64** | **810.2 s** |
 | Qwen3-8B bf16 (May 25) | `benchmarks/results/tool-eval-bench/2026-05-25T11-27-41Z_9cd212.md` | 70 | 4.4 s | 36 | 60 | 921.0 s |
 | **Qwen3-8B fp8** | `benchmarks/results/tool-eval-bench/2026-05-27T11-21-32Z_f865fa.md` | **74** | **3.8 s** | **41** | **64** | **801.7 s** |
-| Orthrus diffusion fp8-row | `benchmarks/results/tool-eval-bench/2026-05-27T13-48-48Z_cbc6af.md` | 69 | 3.6 s | 43 | 61 | 672.3 s |
+| **Orthrus diffusion fp8-row** | `benchmarks/results/tool-eval-bench/2026-05-28T09-26-58Z_cbc6af.md` | 70 | 1.9 s | 67 | 69 | 326.0 s |
 | **Orthrus diffusion nvfp4** | `benchmarks/results/tool-eval-bench/2026-05-27T15-48-11Z_9716ca.md` | **71** | **1.4 s** | **76** | **72** | **253.7 s** |
 | Orthrus no-diff nvfp4 | `benchmarks/results/tool-eval-bench/2026-05-27T15-59-16Z_9716ca.md` | 69 | 2.6 s | 55 | 65 | 521.0 s |
 
-Wall-clock totals are derived from the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements at fp8 (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8, see "Long-form generation at fp8" below) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly. The fp8-row row is a negative result: per-row quantisation breaks the diffusion drafter and collapses throughput to AR speed (full mechanism in [`quantization.md`'s "Per-row fp8 breaks the diffusion drafter"](quantization.md#per-row-fp8-breaks-the-diffusion-drafter) and the "Per-row fp8 (negative result)" section below). The nvfp4 row is the fastest configuration in this table: 4-bit weights with per-block scales fire on Blackwell-native triton kernels (smoke test 1.74x bf16 long-prompt, here 31% wall-clock reduction vs fp8). Accuracy drops 3 points vs fp8 (71 vs 74); see the "NVFP4 (4-bit, ships)" section below for the full story.
+Wall-clock totals are derived from the `Date − Run ID` timestamp delta in each `.md` file. Wall-clock improvements at fp8 (Orthrus diffusion −8%, no-diff −12%, Qwen3 −13%) are smaller than the per-token throughput improvements (~+28% from fp8, see "Long-form generation at fp8" below) because tool-eval-bench wall-clock includes per-turn HTTP overhead, tool-result processing, and inter-turn coordination; only the matmul-bound generation portion benefits from fp8 directly. The fp8-row row runs at diffusion-mode turn times (1.9 s) and scores 70/100 — within noise of fp8 (74) — with the drafter fully intact; per-row is in fact the fastest 8-bit scheme on long-form throughput (see "Per-row fp8" and "All PTQ schemes preserve the drafter" below). The nvfp4 row is the fastest configuration in this table: 4-bit weights with per-block scales fire on Blackwell-native triton kernels (smoke test 1.74x bf16 long-prompt, here 31% wall-clock reduction vs fp8). Accuracy drops 3 points vs fp8 (71 vs 74); see the "NVFP4 (4-bit, ships)" section below for the full story.
 
 **Headline: all three configs tie at 74/100 (102/138 points) under fp8. Orthrus diffusion is 2.3× faster on median turn time than either AR-mode arm.** The 3-4× diffusion speedup over vanilla AR carries through fp8 cleanly; accuracy converges across all three arms.
 
@@ -113,19 +113,19 @@ tool-eval-bench (`benchmarks/results/tool-eval-bench/2026-05-27T15-48-11Z_9716ca
 | **Orthrus diffusion nvfp4** | **71** | **1.4 s** | **253.7 s** | **5** |
 | Orthrus no-diff nvfp4 | 69 | 2.6 s | 521.0 s | 3 |
 
-The no-diff row enables the drafter-speedup comparison: median turn 2.6s nodiff vs 1.4s diff — 1.86× drafter speedup (vs fp8's 2.29× and fp8-row's ~1.0×). Score 69 vs 71 is within noise tolerance at this seed and sample size (2 points = 3 scenarios flipping near tie tips on a 69-scenario bench) and shouldn't be read as a drafter accuracy effect either way. Safety-crit count drifts 3 vs 5 between the two arms but the specific scenarios (TC-43 passing in nodiff while failing in every other arm we've measured, TC-41 failing only in diffusion at this single seed) are also in noise territory.
+The no-diff row enables the drafter-speedup comparison: median turn 2.6s nodiff vs 1.4s diff — 1.86× drafter speedup (vs fp8's 2.29×). Score 69 vs 71 is within noise tolerance at this seed and sample size (2 points = 3 scenarios flipping near tie tips on a 69-scenario bench) and shouldn't be read as a drafter accuracy effect either way. Safety-crit count drifts 3 vs 5 between the two arms but the specific scenarios (TC-43 passing in nodiff while failing in every other arm we've measured, TC-41 failing only in diffusion at this single seed) are also in noise territory.
 
 Memory: 18.5 GB bf16 → 10.4 GB fp8 → **6.4 GB nvfp4**. Enough headroom to either run two NVFP4 instances on a single 128 GB Spark, or to push context length significantly beyond the 40k default with one instance plus its KV cache.
 
-**Drafter survival is a spectrum, not binary** (refined uniform-vs-structured hypothesis):
+**The drafter survives every quantisation scheme tested** — granularity does not matter:
 
-| Scheme | Granularity | Drafter speedup (turn ratio) | Mechanism |
-|---|---|---:|---|
-| fp8 | per-tensor (1 scale / Linear) | **2.29×** (3.9/1.7) | uniform; every row rescaled identically; drafter fully tracks |
-| nvfp4 | per-block (~16 elements) | **1.86×** (2.6/1.4) | block-wise; high-frequency within a row, partially averages out at row level; drafter partially tracks |
-| fp8-row | per-row (1 scale / output channel) | **~1.0×** (drafter dead) | rigidly non-uniform across rows; drafter can't track at all |
+| Scheme | Granularity | Drafter speedup (diffusion long / nodiff long) |
+|---|---|---:|
+| fp8 | per-tensor (1 scale / Linear) | 4.7× (65.3 / 14.0) |
+| nvfp4 | per-block (~16 elements) | drafter intact (1.4 s median turn; no-diff HTTP not benched) |
+| fp8-row | per-row (1 scale / output channel) | **4.9× (78.6 / 16.1)** |
 
-The refined rule: **the drafter's accept rate is a continuous function of how much the quantisation pattern looks uniform-at-the-row-level.** Per-tensor is trivially uniform → full speedup. Per-block is locally non-uniform but averages out at the row scale → partial speedup. Per-row is rigidly non-uniform at exactly the row scale → no speedup at all. Bit width matters much less than perturbation geometry: NVFP4 is 4-bit yet drafter-friendly (1.86× speedup); fp8-row is 8-bit yet drafter-hostile (1.0× speedup).
+Per-tensor, per-block, and per-row all keep the drafter accepting at high rates — the diffusion arm runs 3-5× faster than the AR floor in every case. There is no "uniform vs structured" sensitivity: calibration-free PTQ does not perturb the drafter↔teacher alignment for this model, regardless of weight-scale granularity or bit width.
 
 **When to use NVFP4**:
 - Memory pressure (running two instances, longer contexts, larger models on smaller hardware in future)
@@ -138,28 +138,28 @@ The refined rule: **the drafter's accept rate is a continuous function of how mu
 
 `fp8` remains the recommended default for orthrus-serve; `nvfp4` is the recommended alternative when memory or throughput dominates accuracy preferences.
 
-### Per-row fp8 (negative result)
+### Per-row fp8 (fastest 8-bit scheme)
 
-Tried `fp8-row` (`Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`) on 2026-05-27 as a higher-fidelity alternative to per-tensor fp8. Result: it breaks the diffusion drafter and is strictly worse than `fp8` for Orthrus-diffusion serving.
+`fp8-row` (`Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`) uses per-output-channel weight scales instead of one scale per Linear. The drafter is fully intact and it is the fastest 8-bit scheme on long-form generation:
 
 | Config | short tok/s | long tok/s | tool-eval-bench |
 |---|---:|---:|---:|
 | Orthrus diffusion fp8 | 43.5 | 65.3 | 74 / 100 |
-| Orthrus diffusion fp8-row | 16.6 | 16.4 | 69 / 100 |
-| Orthrus no-diff fp8-row | 16.6 | 16.3 | (not benched) |
+| **Orthrus diffusion fp8-row** | **47.5** | **78.6** | **70 / 100** |
+| Orthrus no-diff fp8-row | 16.5 | 16.1 | (not benched) |
 
-Diffusion-mode fp8-row produces the same throughput as no-diff fp8-row — the diffusion speedup is gone. Combined with the 5-point tool-eval-bench regression and one extra safety-critical failure (TC-58 regressed vs the fp8 baseline), per-row fp8 fails on both axes that matter for serving.
+Diffusion fp8-row (78.6 long) runs ~4.9× faster than its no-diff floor (16.1) — drafter alive and accepting — and edges out per-tensor fp8 (65.3) on long-form throughput. tool-eval-bench 70/100 is within noise of fp8 (74). Memory matches fp8 at 1.8×.
 
-**Mechanism**: per-row quantisation rescales each output channel by a different factor, perturbing the teacher's predictions in a structured way the drafter (trained against the unquantised teacher) can't track. Verify rejects almost every draft; the pipeline degenerates to single-token AR per step. Per-tensor fp8 doesn't trigger this because its uniform rescale leaves drafter↔teacher alignment intact. Full writeup in [`quantization.md`'s "Per-row fp8 breaks the diffusion drafter"](quantization.md#per-row-fp8-breaks-the-diffusion-drafter).
+So per-row is a fully viable scheme; `fp8` stays the recommended default only on a marginal accuracy preference (74 vs 70, inside the bench's noise floor).
 
-**Implication for Orthrus diffusion-mode serving**: the operational constraint is "uniform quantisation only" until quantisation-aware drafter retraining lands upstream. Per-row, per-group, per-channel schemes are off the table for diffusion-mode at least; they may be fine for no-diff (AR) serving or for non-Orthrus models that don't have a drafter at all.
+When benchmarking any diffusion arm, confirm `"diffusion": true` in the server's `model_ready` log — a diffusion-labelled run against a `--no-diffusion` server is indistinguishable from a dead drafter (its throughput sits at the AR floor).
 
 ### Conclusions
 
 1. **No-diff Orthrus is indistinguishable from base Qwen3, at both bf16 and fp8.** At bf16 both arms score 70/138 (final score 70) with identical median turn time (4.4 s). At fp8 both arms are bit-identical scenario-by-scenario (both 102/138 = 74/100, 0 differences across 69 scenarios; final score 74). Same code path through the same weights at the same precision; greedy decoding gives the same output. The `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache, equivalent to stock Qwen3.
 2. **Diffusion is ~2.2× faster per turn than either AR config across both precisions.** Median turn 2.0 s vs 4.4 s at bf16, 1.7 s vs 3.8-3.9 s at fp8. The diffusion speedup carries through quantisation without weakening.
 3. **At fp8, all three arms converge to identical 74/100 (102/138 points).** Direct empirical confirmation of [orthrus-bench-spark PR 4](../orthrus-bench-spark/RESEARCH_LOG.md#vanilla-qwen3-quantization-sensitivity-orthrus-is-not-uniquely-fragile-to-int8): Orthrus inherits Qwen3's quantisation sensitivity, no unique amplification from the diffusion consensus mechanism. Same 4 safety-critical failures in all three arms (TC-31, TC-34, TC-42, TC-43). See `benchmarks/results/tool-eval-bench/` for per-scenario data.
-4. **Drafter survival is a spectrum in quantisation granularity, not binary.** Measured drafter speedup (no-diff median / diffusion median) at sm_121: fp8 per-tensor 2.29×, NVFP4 per-block 1.86×, fp8-row per-row ~1.0× (dead). Granularity below the row level (per-block, per-tensor) preserves drafter alignment; granularity at the row level (per-row) breaks it; bit width matters much less than perturbation geometry (NVFP4 is 4-bit yet drafter-friendly, fp8-row is 8-bit yet drafter-hostile). For diffusion-mode serving: `fp8` is the recommended default, `nvfp4` is the recommended alternative when memory or throughput priorities outweigh the 3-point tool-eval-bench cost, `fp8-row` is contraindicated. Full mechanism in `quantization.md`.
+4. **The drafter survives every calibration-free PTQ scheme tested — granularity is irrelevant.** Per-tensor (`fp8`), per-row (`fp8-row`), and per-block (`nvfp4`) all keep the diffusion arm running 3-5× above the AR floor (long-prompt: fp8 65.3, fp8-row 78.6, nvfp4 88.9 tok/s; AR floor ~14-16). tool-eval-bench clusters at 70-74 across all four arms (within noise). Scheme choice is a memory/throughput/accuracy trade-off, not a drafter-survival question: `fp8` is the recommended default (best accuracy), `nvfp4` the alternative for memory/throughput priority, `fp8-row` viable and fastest on 8-bit long-form throughput. Single-side quantisation (teacher-only / drafter-only probes) buys nothing over quantising the whole model. Full detail in `quantization.md`.
 
 ### Reproducing
 
@@ -202,55 +202,43 @@ Output appends each `--label` into `results/results_http.json` (cwd-relative; ru
 
 ## Findings: can you quantise an Orthrus model without retraining?
 
-The benchmarks above are specific to Orthrus-Qwen3-8B at 2026-05-27. The Qwen3 base is already a generation old (Qwen3.7 just shipped) and the authors will presumably release a Qwen3.7-based Orthrus checkpoint at some point. When that happens, the same question will recur: **can it be served quantised on Spark via off-the-shelf post-training quantisation (PTQ — taking a full-precision checkpoint and converting it to a quantised one with no retraining), or does it need quantisation-aware training (QAT — retraining the model while accounting for the rounding noise the quantisation will introduce) to recover the drafter?** The transferable answer from this investigation is **"it depends on the perturbation geometry, not the bit width."**
+The benchmarks above are specific to Orthrus-Qwen3-8B at 2026-05-27. The Qwen3 base is already a generation old (Qwen3.7 just shipped) and the authors will presumably release a Qwen3.7-based Orthrus checkpoint at some point. When that happens, the same question will recur: **can it be served quantised on Spark via off-the-shelf post-training quantisation (PTQ — taking a full-precision checkpoint and converting it to a quantised one with no retraining), or does it need quantisation-aware training (QAT — retraining the model while accounting for the rounding noise the quantisation will introduce) to recover the drafter?** The transferable answer from this investigation is **"yes, off-the-shelf PTQ works — every scheme tested preserves the drafter; the choice is a memory/accuracy trade-off."**
 
 (Why those two acronyms recur in this section: PTQ is what `orthrus-serve` does — it takes the released bf16 checkpoint and applies torchao's quantisation in-process, no extra training step. QAT would require the model authors to retrain Orthrus while simulating the target quantisation's noise, then release that as a separate checkpoint. PTQ is cheap and one-step; QAT is upstream and a research/training project.)
 
 ### What this study found that should generalise
 
-Measured median turn time on tool-eval-bench (sm_121, 2026-05-27). The baseline is bf16 no-diff = 4.4 s median (pure autoregressive single-token-at-a-time generation with no quantisation — the configuration you would get from any vanilla transformer serving stack with no Orthrus-specific work and no quantisation).
+Measured median turn time on tool-eval-bench (sm_121). The baseline is bf16 no-diff = 4.4 s median (pure autoregressive single-token-at-a-time generation with no quantisation — the configuration you would get from any vanilla transformer serving stack with no Orthrus-specific work and no quantisation).
 
-| Scheme | Bits | Weight granularity | nodiff median | diff median | Drafter only (nodiff/diff) | Total vs bf16-nodiff baseline (4.4/diff) |
-|---|---|---|---:|---:|---:|---:|
-| bf16 | 16 | n/a | 4.4 s | 2.0 s | **2.20×** | **2.20×** |
-| fp8 (per-tensor) | 8 | 1 scale / Linear | 3.9 s | 1.7 s | **2.29×** | **2.59×** |
-| nvfp4 (per-block) | 4 | 1 scale / ~16-elem block | 2.6 s | 1.4 s | **1.86×** | **3.14×** |
-| fp8-row (per-row) | 8 | 1 scale / output channel | ~3.6 s* | 3.6 s | **~1.0× (dead)** | **1.22×** |
+| Scheme | Bits | Weight granularity | diff median turn | Total speedup vs bf16-nodiff (4.4 s) | Drafter |
+|---|---|---|---:|---:|---|
+| bf16 | 16 | n/a | 2.0 s | **2.20×** | intact |
+| fp8 (per-tensor) | 8 | 1 scale / Linear | 1.7 s | **2.59×** | intact |
+| fp8-row (per-row) | 8 | 1 scale / output channel | 1.9 s | **2.32×** | intact |
+| nvfp4 (per-block) | 4 | 1 scale / ~16-elem block | 1.4 s | **3.14×** | intact |
 
-\* fp8-row no-diff median turn time was not directly measured on tool-eval-bench (we ran HTTP-bench instead, which showed nodiff_fp8_row at 16.6 / 16.3 tok/s — essentially identical to diffusion-mode fp8-row at 16.6 / 16.4 tok/s, confirming the drafter was rejected). The "~3.6 s" is an inference from that: if diff and nodiff give the same throughput, the drafter is contributing nothing.
+The "Total speedup" column is the end-to-end win of each configuration over the dumb baseline (a vanilla single-token AR serving stack, here bf16 no-diff). It stacks the diffusion drafter's speedup and the quant's matmul speedup together. **bf16-diffusion alone gives 2.20×** (the "free" win of choosing Orthrus over vanilla AR); fp8 takes it to 2.59×, nvfp4 to 3.14×. The drafter is the load-bearing piece, and it survives every quantisation scheme — the diffusion arm runs 3-5× above the AR floor under bf16, fp8, fp8-row, and nvfp4 alike (HTTP long-prompt diffusion/nodiff ratios: bf16 4.7×, fp8 4.7×, fp8-row 4.9×).
 
-How to read the two right-most columns:
+The general finding: **calibration-free PTQ does not disrupt the diffusion drafter for this model, at any weight-scale granularity (per-tensor, per-row, per-block) or bit width (8-bit, 4-bit) tested.** Bit width is the main accuracy lever (4-bit nvfp4 costs ~3 tool-eval-bench points vs 8-bit fp8), and granularity/format mostly affects kernel throughput, not drafter survival.
 
-- **Drafter only (nodiff / diff)**: at this same precision, how much does turning on the diffusion drafter speed you up? Isolates the drafter's contribution at that quant scheme. This is the column that exposes the "fp8-row breaks the drafter" finding (1.0× = drafter useless).
-- **Total vs bf16-nodiff baseline**: what's the end-to-end speedup of this configuration over the dumb baseline (a vanilla AR-fp32-style serving stack, here represented by bf16 no-diff)? This is the column that tells you what speedup the user actually gets if they pick this scheme. Stacks the diffusion speedup AND the quant speedup together.
-
-Two things become visible by looking at both columns together:
-
-1. **bf16-diffusion alone gives 2.20×** (the "free" speedup of choosing Orthrus over vanilla AR with no quantisation). fp8 on top adds 18% more (2.20 → 2.59). NVFP4 on top adds 43% more (2.20 → 3.14). The quant compounds with the drafter.
-2. **fp8-row loses the drafter completely** (1.0× in the drafter-only column) and ends up at 1.22× total — barely better than the vanilla-AR baseline, despite "having Orthrus" and "having a quant." The drafter is the load-bearing piece; killing it negates most of the deployment value.
-
-The predictive rule that emerges: **the drafter's accept rate is a continuous function of how uniform the weight perturbation looks at the row level.** Per-tensor is trivially uniform per row → drafter fully tracks. Per-block is locally non-uniform but averages out at the row scale → drafter partially tracks. Per-row is rigidly non-uniform at exactly the row scale → drafter cannot track.
-
-Crucially: **bit width matters much less than perturbation geometry.** NVFP4 is 4-bit yet drafter-friendly (1.86× drafter-only speedup); fp8-row is 8-bit yet drafter-hostile (1.0× drafter-only speedup). The drafter cares about relative-magnitude preservation across the weight matrix, not per-element rounding noise.
-
-Shipping status for the orthrus-serve endpoint: fp8 is the recommended default (best accuracy + drafter intact), NVFP4 is the recommended alternative for memory or throughput priority (3-point accuracy cost + partial drafter speedup, but 38% less memory and 1.5× the bf16-baseline total speedup), fp8-row is contraindicated for diffusion-mode serving.
+Shipping status for the orthrus-serve endpoint: `fp8` is the recommended default (best accuracy 74, drafter intact, 1.8× memory); `nvfp4` the recommended alternative for memory or throughput priority (2.89× memory, fastest, ~3-point accuracy cost); `fp8-row` is viable and the fastest 8-bit scheme on long-form throughput (accuracy within noise of fp8).
 
 ### What this means for the next Orthrus checkpoint
 
-For a future Orthrus release (whether it's Qwen3.7-based, larger, or with a different teacher backbone), the answer to "can I PTQ this for serving on my Spark?" is:
+For a future Orthrus release (whether it's Qwen3.7-based, larger, or with a different teacher backbone), the answer to "can I PTQ this for serving on my Spark?" is **yes, try the off-the-shelf schemes first**:
 
-- **Per-tensor fp8 should work calibration-free**, with the smallest accuracy cost and full drafter speedup. The same `Float8DynamicActivationFloat8WeightConfig()` call we use here.
-- **NVFP4 (per-block ~16 elements) should also work calibration-free** for memory pressure, with a small accuracy cost (3 points here at 8B; presumably similar order at larger scales) and partial drafter speedup. The `NVFP4InferenceConfig()` call.
-- **Per-row and per-channel weight scaling will break the drafter** without quantisation-aware drafter retraining. If a future Orthrus release ships with QAT against a per-row teacher, this changes; until then, treat per-row schemes as "needs drafter retrained for this scheme."
-- **Other future schemes** (per-group with small groups, MXFP6, NVFP6, etc.) are predictable from the framework: if the weight scale granularity is below the row level (so row-level effect averages out) the drafter survives; if it's at or above the row level it doesn't. Bit width is a separate axis affecting standalone accuracy but not drafter survival.
+- **Per-tensor fp8** — smallest accuracy cost, full drafter speedup, 1.8× memory. The `Float8DynamicActivationFloat8WeightConfig()` call.
+- **Per-row fp8** — same memory, fastest 8-bit long-form throughput, accuracy within noise. `Float8DynamicActivationFloat8WeightConfig(granularity=PerRow())`.
+- **NVFP4 (per-block ~16 elements)** — 2.89× memory for a small (~3-point) accuracy cost. `NVFP4InferenceConfig()`.
+- **Other schemes** (per-group, MXFP6, NVFP6, AWQ-int4, etc.) are worth trying directly; nothing in this study suggests any granularity disrupts the drafter, so the open risk is standalone accuracy at very low bit widths, not drafter survival.
 
-The fix for the per-row case is "retrain the drafter against a per-row-quantised teacher" (quantisation-aware drafter retraining). That belongs upstream in Orthrus training code, not in a serving stack. Until it lands, the operational constraint for any Orthrus checkpoint is: pick a PTQ scheme whose weight-perturbation pattern doesn't disrupt the drafter's calibration.
+QAT (retraining the drafter against the quantised teacher) is only worth reaching for if some future low-bit scheme turns out to cost too much *accuracy* — it is not needed to keep the drafter alive under the schemes tested here.
 
 ### What this study doesn't answer
 
 - Sample size is 8B parameters; bigger models might have different drafter robustness (the drafter could be more forgiving with more capacity to absorb perturbation, or less forgiving with sharper near-tie distributions in tool-call grammar tokens).
-- Sample size is one teacher family (Qwen3); different teacher backbones might respond differently. The mechanism we've identified depends only on the existence of a drafter trained against a specific teacher, so the *shape* of the answer should transfer, but the specific drafter speedup numbers will not.
-- Sample is one hardware target (Blackwell sm_121). Other hardware will have different kernel-tuning gaps (the 12% per-row throughput cost we measured is a cuBLAS sm_121 fact, not a fundamental algorithmic one). The drafter-alignment finding is hardware-agnostic; the throughput numbers are not.
+- Sample size is one teacher family (Qwen3); different teacher backbones might respond differently. The finding depends only on the existence of a drafter trained against a specific teacher, so the *shape* of the answer (PTQ preserves the drafter) should transfer, but the specific speedup numbers will not.
+- Sample is one hardware target (Blackwell sm_121). The relative kernel throughputs (per-row vs per-tensor vs per-block) are sm_121 cuBLAS/triton facts, not fundamental algorithmic ones; other hardware may reorder them. The drafter-survival finding is hardware-agnostic; the throughput numbers are not.
 - Sample is one bench (tool-eval-bench). Other accuracy benchmarks (general MMLU-style, code generation, math reasoning) might surface different sensitivities than tool-call grammar.
 
-If a future Orthrus release surprises against this framework (e.g. per-row works without retraining), the most likely cause is that the drafter's training procedure was changed to be quantisation-robust — at which point this writeup needs updating. The framework is a falsifiable prediction, not a settled rule.
+The drafter-survival finding (all PTQ schemes tested preserve the drafter) is empirical, not a theory — a future Orthrus release with a differently-trained drafter could behave differently, at which point this writeup needs re-checking. It also assumes the diffusion arm is genuinely measured in diffusion mode (see the diffusion-mode caveat under "Per-row fp8").

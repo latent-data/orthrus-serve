@@ -66,16 +66,16 @@ logger = logging.getLogger(__name__)
 #                           output-channel weight scales, per-token activation
 #                           scales). Slightly higher numerical fidelity for
 #                           weights with per-row outlier structure. Memory
-#                           reduction matches "fp8" (the per-row scale tensor
-#                           is negligible relative to the weight). Throughput
-#                           measured on Blackwell sm_121 short-prompt smoke
-#                           test (2026-05-27): 24.8 tok/s vs fp8's 28.0
-#                           tok/s vs bf16's 21.1 tok/s -- per-row is 1.17x
-#                           bf16, 0.88x fp8. The 12% gap vs per-tensor
-#                           reflects cuBLAS dispatching a less-tuned per-row
-#                           kernel on sm_121 (Hopper has better-tuned
-#                           kernels; gap may close as Blackwell tuning
-#                           lands). Opt-in for accuracy-sensitive workloads.
+#                           reduction matches "fp8" (1.8x; the per-row scale
+#                           tensor is negligible). The diffusion drafter is
+#                           fully intact under per-row -- diffusion-mode
+#                           long-prompt HTTP throughput is 78.6 tok/s, the
+#                           fastest 8-bit scheme measured (vs fp8's 65.3 and
+#                           bf16's 51.1), and tool-eval-bench 70/100 sits
+#                           within a few points of fp8 (74) / bf16 (72) /
+#                           nvfp4 (71). A viable scheme; per-tensor "fp8"
+#                           stays the default only on a marginal accuracy
+#                           preference.
 #   - "fp8-weight-only"  -> Float8WeightOnlyConfig. Weights stored fp8 but
 #                           matmul DEQUANTIZES to bf16 then runs the bf16
 #                           kernel. Empirically: ~10x SLOWER than bf16 on
@@ -93,32 +93,27 @@ logger = logging.getLogger(__name__)
 #                           prototype-namespace in torchao 0.15.
 #   - "fp8-row-teacher-only" -> Same as "fp8-row" but applied ONLY to the
 #                           teacher (AR + shared) weights; the Orthrus
-#                           `_diff` drafter projections stay bf16. Mechanism
-#                           probe: per-row fp8 breaks the diffusion drafter
-#                           when applied everywhere ("fp8-row"); this isolates
-#                           whether the breakage is driven by perturbing the
-#                           TEACHER (whose argmax the drafter was trained to
-#                           match) or the drafter's own weights. Accuracy is
-#                           governed by the teacher, so this should match
-#                           "fp8-row" on tool-eval-bench (~69); the question
-#                           is whether the drafter accept rate recovers off
-#                           the AR floor. Production-relevant: teacher is ~84%
-#                           of params, so most of the memory win survives.
+#                           `_diff` drafter projections stay bf16. Probe for
+#                           "is it worth quantising only one side?": the
+#                           drafter stays alive (diffusion long-prompt 77.9
+#                           tok/s, ~ full fp8-row's 78.6), but accuracy is
+#                           governed by the teacher so it still lands at
+#                           ~fp8-row's tool-eval-bench. Since full fp8-row
+#                           already keeps the drafter and quantises ~16% more
+#                           params for free, teacher-only buys nothing -- the
+#                           answer is "no, just quantise everything".
 #   - "fp8-row-drafter-only" -> Same as "fp8-row" but applied ONLY to the
 #                           `_diff` drafter projections; the teacher stays
-#                           bf16. Pure mechanism control (NOT a useful
-#                           production config: `_diff` is only ~16% of params,
-#                           so near-zero memory win, and the teacher stays at
-#                           full bf16 cost). Accuracy should return to bf16
-#                           (~72) because the unquantised teacher emits the
-#                           verified tokens; the question is whether the
-#                           drafter tolerates per-row noise in its OWN
-#                           proposals. NOTE: the AR-mode smoke test does not
-#                           exercise `_diff` at all (those projections are
-#                           only used in diffusion mode), so smoke throughput
-#                           / output for this scheme reflect the unquantised
-#                           teacher path; the real signal is the diffusion-
-#                           mode HTTP throughput bench.
+#                           bf16. The other half of the single-side probe:
+#                           drafter alive but only ~bf16 throughput (long
+#                           50.4 tok/s) because the teacher matmul (~84% of
+#                           compute) isn't accelerated, and near-zero memory
+#                           win (`_diff` is ~16% of params). Also "no". NOTE:
+#                           the AR-mode smoke test does not exercise `_diff`
+#                           at all (those projections are only used in
+#                           diffusion mode), so smoke throughput / output for
+#                           this scheme reflect the unquantised teacher path;
+#                           the real signal is the diffusion-mode HTTP bench.
 FP8 = "fp8"
 FP8_ROW = "fp8-row"
 FP8_ROW_TEACHER = "fp8-row-teacher-only"
@@ -218,10 +213,10 @@ def _should_quantize_linear(
         the AR weights adds essentially no additional output divergence at
         per-tensor granularity), so we get the memory win for free.
       - "teacher": only the AR + shared backbone (everything NOT containing
-        `_diff`). Used by fp8-row-teacher-only to test whether the per-row
-        drafter breakage is driven by teacher-side perturbation.
-      - "drafter": only the `_diff` projections. Used by fp8-row-drafter-only
-        as a mechanism control.
+        `_diff`). Used by fp8-row-teacher-only to probe whether quantising
+        only one side is worth it.
+      - "drafter": only the `_diff` projections. Used by fp8-row-drafter-only,
+        the other half of that single-side probe.
     """
     if not isinstance(module, nn.Linear):
         return False
@@ -409,16 +404,13 @@ def _apply_nvfp4(model: nn.Module) -> None:
       - Diffusion-mode HTTP serving, long prompt: 88.9 tok/s vs fp8's
         65.3 tok/s vs bf16's 51.1 tok/s, i.e. 1.36x fp8 / 1.74x bf16.
 
-    The diffusion drafter SURVIVES NVFP4 (unlike fp8-row, which breaks
-    the drafter through rigid per-row perturbation). The mechanism is
-    that block-wise scales vary at high frequency WITHIN a row (~16
-    weights per scale), so the row-level effect averages out to look
-    approximately uniform -- which is what drafter↔teacher alignment
-    needs. Per-row's rigid one-scale-per-row perturbation is what kills
-    the drafter, not the granularity per se. NVFP4 is finer-grained
-    than per-row and yet works, because the granularity is below the
-    row level rather than at it. (4-bit precision turns out to matter
-    much less than the structure of the perturbation.)
+    The diffusion drafter survives NVFP4 (median turn 1.4 s, the fastest
+    of any scheme). It survives every PTQ scheme we have measured -- fp8
+    per-tensor, fp8 per-row, and nvfp4 per-block all keep the drafter
+    accepting at high rates. Calibration-free post-training quantisation
+    does not disrupt the drafter↔teacher alignment for this model; the
+    only cost of going to 4 bits is a small (~3-point) tool-eval-bench
+    accuracy dip vs fp8.
 
     For accuracy: tool-eval-bench result is in
     `benchmarks/results/tool-eval-bench/` and the README has the

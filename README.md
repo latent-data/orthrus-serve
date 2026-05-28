@@ -8,7 +8,7 @@ Target hardware: single NVIDIA DGX Spark (GB10, sm_121, 128 GB unified memory) r
 
 Orthrus is a diffusion-mode language model: it generates a block of candidate tokens per forward pass with a small "drafter" head and verifies them in parallel against the autoregressive (AR) teacher. This server wraps it in an OpenAI-compatible API so it can be evaluated alongside vLLM, LiteLLM, and llama.cpp endpoints with no benchmark-side code changes. The reference parity endpoint is a vanilla `Qwen3-8B` served via llama.cpp on the same machine.
 
-For the full empirical investigation (tool-eval-bench scores, long-form throughput, the cross-scheme drafter-survival framework), see [RESEARCH_LOG.md](RESEARCH_LOG.md). For the implementation of each quantisation scheme, see [quantization.md](quantization.md).
+For the full empirical investigation (tool-eval-bench scores, long-form throughput, the cross-scheme comparison), see [RESEARCH_LOG.md](RESEARCH_LOG.md). For the implementation of each quantisation scheme, see [quantization.md](quantization.md).
 
 ## Headline numbers
 
@@ -17,13 +17,13 @@ On Orthrus-Qwen3-8B, sm_121, 69-scenario tool-eval-bench at `--seed 42`:
 | Scheme | Final score | Median turn | Memory | When to use |
 |---|---:|---:|---:|---|
 | bf16 | 72 | 2.0 s | 18.5 GB | reference |
-| **fp8** (default) | **74** | **1.7 s** | **10.4 GB** | accuracy + drafter intact |
+| **fp8** (default) | **74** | **1.7 s** | **10.4 GB** | best accuracy |
 | **nvfp4** | **71** | **1.4 s** | **6.4 GB** | memory / throughput priority |
-| fp8-row | 69 | 3.6 s | 10.4 GB | contraindicated — breaks the drafter |
+| fp8-row | 70 | 1.9 s | 10.4 GB | fastest 8-bit long-form throughput |
 
-The diffusion drafter gives ~2.2× speedup over autoregressive serving at bf16; fp8 compounds to 2.6× and NVFP4 to 3.1× total over a vanilla bf16-AR baseline. NVFP4 trades 3 tool-eval-bench points for 38% less memory and the highest throughput we have measured (88.9 long-prompt tok/s).
+The diffusion drafter survives every quantisation scheme — all four arms score 70-74 (within bench noise) and run at diffusion-mode turn times. The drafter gives a ~3-5× speedup over autoregressive serving, and quant throughput stacks on top: long-prompt generation goes bf16 51.1 → fp8 65.3 → fp8-row 78.6 → nvfp4 88.9 tok/s. Pick a scheme on the memory/throughput/accuracy trade-off; there's no drafter-survival gotcha.
 
-The detailed numbers, scenario-level structure, and the drafter-survival framework that predicts which quant schemes are safe for diffusion-mode serving live in [RESEARCH_LOG.md](RESEARCH_LOG.md).
+The detailed numbers, scenario-level structure, and the single-side-quantisation probe live in [RESEARCH_LOG.md](RESEARCH_LOG.md).
 
 ## How to run
 
@@ -43,7 +43,7 @@ PORT=9090 ./run.sh              # use a different port
 ./run.sh --disable-thinking     # force thinking tokens off
 ./run.sh --quant fp8            # serve at fp8 (recommended default)
 ./run.sh --quant nvfp4          # serve at NVFP4 (memory / throughput priority)
-./run.sh --quant fp8-row        # per-row weight scales — breaks the diffusion drafter, see quantization.md
+./run.sh --quant fp8-row        # per-row weight scales — fastest 8-bit long-form throughput
 ```
 
 Environment variables (defaults are baked into the Dockerfile):
