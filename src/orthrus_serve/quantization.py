@@ -91,18 +91,50 @@ logger = logging.getLogger(__name__)
 #                           per-block, not per-tensor (4 bits is too few
 #                           to make a single per-Linear scale work);
 #                           prototype-namespace in torchao 0.15.
+#   - "fp8-row-teacher-only" -> Same as "fp8-row" but applied ONLY to the
+#                           teacher (AR + shared) weights; the Orthrus
+#                           `_diff` drafter projections stay bf16. Mechanism
+#                           probe: per-row fp8 breaks the diffusion drafter
+#                           when applied everywhere ("fp8-row"); this isolates
+#                           whether the breakage is driven by perturbing the
+#                           TEACHER (whose argmax the drafter was trained to
+#                           match) or the drafter's own weights. Accuracy is
+#                           governed by the teacher, so this should match
+#                           "fp8-row" on tool-eval-bench (~69); the question
+#                           is whether the drafter accept rate recovers off
+#                           the AR floor. Production-relevant: teacher is ~84%
+#                           of params, so most of the memory win survives.
+#   - "fp8-row-drafter-only" -> Same as "fp8-row" but applied ONLY to the
+#                           `_diff` drafter projections; the teacher stays
+#                           bf16. Pure mechanism control (NOT a useful
+#                           production config: `_diff` is only ~16% of params,
+#                           so near-zero memory win, and the teacher stays at
+#                           full bf16 cost). Accuracy should return to bf16
+#                           (~72) because the unquantised teacher emits the
+#                           verified tokens; the question is whether the
+#                           drafter tolerates per-row noise in its OWN
+#                           proposals. NOTE: the AR-mode smoke test does not
+#                           exercise `_diff` at all (those projections are
+#                           only used in diffusion mode), so smoke throughput
+#                           / output for this scheme reflect the unquantised
+#                           teacher path; the real signal is the diffusion-
+#                           mode HTTP throughput bench.
 FP8 = "fp8"
 FP8_ROW = "fp8-row"
+FP8_ROW_TEACHER = "fp8-row-teacher-only"
+FP8_ROW_DRAFTER = "fp8-row-drafter-only"
 FP8_WEIGHT_ONLY = "fp8-weight-only"
 NVFP4 = "nvfp4"
 
-SUPPORTED_QUANT_SCHEMES = (FP8, FP8_ROW, FP8_WEIGHT_ONLY, NVFP4)
+SUPPORTED_QUANT_SCHEMES = (
+    FP8, FP8_ROW, FP8_ROW_TEACHER, FP8_ROW_DRAFTER, FP8_WEIGHT_ONLY, NVFP4,
+)
 
 # Schemes that go through a fast native-matmul path (torch._scaled_mm for
 # fp8 on Hopper/Blackwell; triton-fp4 kernel for nvfp4). Used by the smoke
 # test's verdict logic to decide whether a throughput regression is
 # expected (weight-only) or a failure.
-_FAST_FP8_SCHEMES = (FP8, FP8_ROW, NVFP4)
+_FAST_FP8_SCHEMES = (FP8, FP8_ROW, FP8_ROW_TEACHER, FP8_ROW_DRAFTER, NVFP4)
 
 # Per-scheme expected speedup over bf16 (PASS threshold for the smoke
 # verdict). FP8 (per-tensor) hits ~1.33x on sm_121 short-prompt; FP8_ROW
@@ -112,15 +144,37 @@ _FAST_FP8_SCHEMES = (FP8, FP8_ROW, NVFP4)
 # 05-27); long-prompt diffusion-mode HTTP serving recovers the win,
 # landing at 1.74x bf16. Smoke threshold reflects the smoke ceiling.
 
-_FAST_FP8_PASS_THRESHOLDS = {FP8: 1.20, FP8_ROW: 1.10, NVFP4: 1.20}
+#   - fp8-row-teacher-only: same per-row kernel as fp8-row on the 84% of
+#     Linears that are the teacher; smoke (AR mode) should look like fp8-row.
+#   - fp8-row-drafter-only: AR-mode smoke runs through the unquantised
+#     teacher (the `_diff` projections aren't on the AR path), so throughput
+#     is ~bf16 (1.0x) and the threshold is set accordingly — this scheme's
+#     real signal is the diffusion-mode HTTP bench, not the smoke test.
+_FAST_FP8_PASS_THRESHOLDS = {
+    FP8: 1.20, FP8_ROW: 1.10, FP8_ROW_TEACHER: 1.05, FP8_ROW_DRAFTER: 0.90,
+    NVFP4: 1.20,
+}
 
 # Per-scheme expected memory-reduction ceiling for the smoke verdict.
 # fp8 family halves Linear bytes (~1.77x model-wide because embedding +
 # lm_head + norms stay bf16). NVFP4 quarters them plus a small per-block
 # scale overhead (~16-element blocks with fp8 scales) yielding a ~3.55x
 # weight-byte reduction or ~2.5x model-wide ceiling on an 8B Qwen3.
+# fp8-row-teacher-only leaves the ~16%-of-params `_diff` projections at bf16,
+# so its model-wide reduction is lower than full fp8 (~1.4x vs ~1.77x).
+# fp8-row-drafter-only quantises only the `_diff` projections (~16% of params),
+# so the model-wide reduction is small (~1.05x).
 _QUANT_MEMORY_PASS_THRESHOLDS = {
-    FP8: 1.60, FP8_ROW: 1.60, FP8_WEIGHT_ONLY: 1.60, NVFP4: 2.30,
+    FP8: 1.60, FP8_ROW: 1.60, FP8_ROW_TEACHER: 1.40, FP8_ROW_DRAFTER: 1.03,
+    FP8_WEIGHT_ONLY: 1.60, NVFP4: 2.30,
+}
+
+# Human-readable expected memory-reduction string per scheme for the smoke
+# verdict (the bare threshold above is the machine check).
+_QUANT_MEMORY_EXPECTED = {
+    NVFP4: "~2.4-2.6x (4-bit weights)",
+    FP8_ROW_TEACHER: "~1.4x (teacher only; `_diff` stays bf16)",
+    FP8_ROW_DRAFTER: "~1.05x (drafter only; ~16% of params quantised)",
 }
 
 
@@ -128,7 +182,25 @@ _QUANT_MEMORY_PASS_THRESHOLDS = {
 # Filter: which Linear layers do we quantize?
 # ---------------------------------------------------------------------------
 
-def _should_quantize_linear(fqn: str, module: nn.Module) -> bool:
+# A parameter / module belongs to the Orthrus diffusion drafter iff its
+# qualified name contains "_diff" (the `*_proj_diff` projections added on top
+# of stock Qwen3). Everything else (the AR + shared backbone) is the teacher.
+# Matches the split used in orthrus-bench-spark/quant_benchmark.py.
+_DIFF_MARKER = "_diff"
+
+
+def _target_for_scheme(scheme: Optional[str]) -> str:
+    """Which side of the model a scheme quantises: 'all', 'teacher', 'drafter'."""
+    if scheme == FP8_ROW_TEACHER:
+        return "teacher"
+    if scheme == FP8_ROW_DRAFTER:
+        return "drafter"
+    return "all"
+
+
+def _should_quantize_linear(
+    fqn: str, module: nn.Module, target: str = "all",
+) -> bool:
     """Filter applied per-module before quantization.
 
     Skip:
@@ -136,17 +208,29 @@ def _should_quantize_linear(fqn: str, module: nn.Module) -> bool:
         bf16 because quantization here disproportionately affects perplexity
         and the parameter count is small relative to the layer stack.
       - any non-Linear module (torchao already filters but be explicit).
+      - layers on the wrong side of a teacher/drafter `target` split (see
+        below).
 
-    Quantize:
-      - everything else, including the Orthrus-specific `_diff` projections.
-        PR 2 of orthrus-bench-spark showed the `_diff` projections are a
-        quantization passenger (quantizing them on top of the AR weights adds
-        essentially no additional output divergence), so we get the memory
-        win for free.
+    `target` selects which weights to quantize:
+      - "all" (default): everything eligible, including the Orthrus-specific
+        `_diff` projections. PR 2 of orthrus-bench-spark showed the `_diff`
+        projections are a quantization passenger (quantizing them on top of
+        the AR weights adds essentially no additional output divergence at
+        per-tensor granularity), so we get the memory win for free.
+      - "teacher": only the AR + shared backbone (everything NOT containing
+        `_diff`). Used by fp8-row-teacher-only to test whether the per-row
+        drafter breakage is driven by teacher-side perturbation.
+      - "drafter": only the `_diff` projections. Used by fp8-row-drafter-only
+        as a mechanism control.
     """
     if not isinstance(module, nn.Linear):
         return False
     if "lm_head" in fqn:
+        return False
+    is_diff = _DIFF_MARKER in fqn
+    if target == "teacher" and is_diff:
+        return False
+    if target == "drafter" and not is_diff:
         return False
     return True
 
@@ -188,6 +272,10 @@ def apply_quantization(
         _apply_fp8_dynamic_activation_weight(model, per_row=False)
     elif scheme == FP8_ROW:
         _apply_fp8_dynamic_activation_weight(model, per_row=True)
+    elif scheme == FP8_ROW_TEACHER:
+        _apply_fp8_dynamic_activation_weight(model, per_row=True, target="teacher")
+    elif scheme == FP8_ROW_DRAFTER:
+        _apply_fp8_dynamic_activation_weight(model, per_row=True, target="drafter")
     elif scheme == FP8_WEIGHT_ONLY:
         _apply_fp8_weight_only(model)
     elif scheme == NVFP4:
@@ -242,7 +330,7 @@ def _apply_fp8_weight_only(model: nn.Module) -> None:
 
 
 def _apply_fp8_dynamic_activation_weight(
-    model: nn.Module, per_row: bool = False,
+    model: nn.Module, per_row: bool = False, target: str = "all",
 ) -> None:
     """Both weights and activations in fp8 (dynamic per-token activation
     scaling), with native fp8 matmul via torch._scaled_mm.
@@ -291,9 +379,16 @@ def _apply_fp8_dynamic_activation_weight(
         config = Float8DynamicActivationFloat8WeightConfig()
 
     def _filter(module: nn.Module, fqn: str) -> bool:
-        return _should_quantize_linear(fqn, module)
+        return _should_quantize_linear(fqn, module, target=target)
 
     quantize_(model, config, filter_fn=_filter)
+    if target != "all":
+        n = sum(
+            1 for fqn, m in model.named_modules()
+            if isinstance(m, nn.Linear) and _should_quantize_linear(fqn, m, target)
+        )
+        logger.info("fp8 per-row applied to %s side only (%d Linear layers)",
+                    target, n)
 
 
 def _apply_nvfp4(model: nn.Module) -> None:
@@ -461,15 +556,20 @@ def _smoke_test(scheme: str = FP8) -> None:
     ).input_ids.to(model.device)
 
     # -------- before quant --------
+    target = _target_for_scheme(scheme)
     print("\n=== DIAGNOSTIC: BEFORE QUANTIZATION ===")
     pre_dtypes = _audit_dtypes(model)
     pre_mem = _memory_footprint_mb(model)
     n_linear = sum(pre_dtypes.values())
     n_to_skip = sum(
         1 for n, m in model.named_modules()
-        if isinstance(m, nn.Linear) and not _should_quantize_linear(n, m)
+        if isinstance(m, nn.Linear) and not _should_quantize_linear(n, m, target)
     )
     n_to_quantize = n_linear - n_to_skip
+    if target != "all":
+        print(f"  Target side:           {target!r} "
+              f"(only the {'AR/shared teacher' if target == 'teacher' else 'diffusion `_diff` drafter'} "
+              f"Linears are quantised)")
     print(f"  Linear modules:        {n_linear} total")
     print(f"  Linear dtypes:         {dict(pre_dtypes)}")
     print(f"  Memory footprint:      {pre_mem:.0f} MB")
@@ -572,11 +672,8 @@ def _smoke_test(scheme: str = FP8) -> None:
     # 8-bit schemes and ~2.5x for 4-bit (NVFP4) schemes. Per-scheme PASS
     # threshold (see _QUANT_MEMORY_PASS_THRESHOLDS) reflects that ceiling.
     mem_threshold = _QUANT_MEMORY_PASS_THRESHOLDS.get(scheme, 1.60)
-    expected = (
-        f"~2.4-2.6x for {scheme} on this model size"
-        if scheme == NVFP4
-        else f"~1.7-1.8x for {scheme} on this model size"
-    )
+    expected = _QUANT_MEMORY_EXPECTED.get(
+        scheme, f"~1.7-1.8x for {scheme} on this model size")
     if mem_ratio >= mem_threshold:
         mem_v = f"PASS ({mem_ratio:.2f}x; expected {expected})"
     elif mem_ratio >= mem_threshold * 0.8:
