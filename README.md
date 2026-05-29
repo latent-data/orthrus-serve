@@ -95,4 +95,4 @@ pytest
 
 ## Relation to llama.cpp parity endpoint
 
-The llama.cpp endpoint (`Qwen3-8B-GGUF:Q8_0`) runs on the same machine and exposes the same port 8080. Switch between them with `--base-url`. Both use the Qwen3 chat template and the same tool-call wire format.
+The llama.cpp endpoint (`Qwen3-8B-GGUF:Q8_0`) runs on the same machine and exposes the same port 8080. Start it with [`scripts/llama_parity.sh`](scripts/llama_parity.sh) (stop orthrus-serve first — they share port 8080). Switch between them with `--base-url`. Both use the Qwen3 chat template and the same tool-call wire format.
