@@ -1,6 +1,6 @@
 # orthrus-serve research log
 
-Full benchmark numbers, methodology, and the cross-cutting quantisation-survival framework derived from the orthrus-serve sweeps on DGX Spark (GB10, sm_121). See [README.md](README.md) for the high-level project summary, and [quantization.md](quantization.md) for the implementation-level write-up of each scheme.
+Full benchmark numbers, methodology, and the cross-cutting quantisation-survival framework derived from the orthrus-serve sweeps on DGX Spark (GB10, sm_121). See [README.md](README.md) for the high-level project summary, and [QUANTIZATION.md](QUANTIZATION.md) for the implementation-level write-up of each scheme.
 
 ## Benchmarks
 
@@ -93,7 +93,7 @@ Geomean Orthrus-diffusion-fp8 vs Qwen3-8B-AR-fp8 speedup: **3.79×** (3.08× sho
 2. **Diffusion short prompt only gains 12%** because per-request HTTP overhead and the bootstrap pass dominate when the whole generation is ~12 s wall-clock; the long prompt's matmul-bound generation gets the full +28% from fp8 kernels.
 3. **No-diff fp8 and base-Qwen3 fp8 are within 1% of each other** (14.2/14.0 vs 14.1/14.0), reconfirming the May 25 bf16 finding that the AR-fallback path through Orthrus is indistinguishable from base Qwen3. The PR 4 prediction from `orthrus-bench-spark` (Orthrus inherits Qwen3's quantisation sensitivity, mechanism: shared AR weights) is consistent with this throughput parity holding at fp8.
 
-Memory footprint also drops (per the smoke test in `quantization.md`): ~18.5 GB bf16 → ~10.4 GB fp8 for Orthrus-Qwen3-8B (~1.77× reduction; the ceiling is ~1.8× because the embedding and lm_head stay bf16).
+Memory footprint also drops (per the smoke test in `QUANTIZATION.md`): ~18.5 GB bf16 → ~10.4 GB fp8 for Orthrus-Qwen3-8B (~1.77× reduction; the ceiling is ~1.8× because the embedding and lm_head stay bf16).
 
 ### NVFP4 (4-bit, ships)
 
@@ -154,7 +154,7 @@ Per-tensor, per-block, and per-row all keep the drafter accepting at high rates 
 | **Orthrus diffusion fp8-row** | **47.5** | **78.6** | **70 / 100** |
 | Orthrus no-diff fp8-row | 16.6 | 16.3 | (not benched) |
 
-Diffusion fp8-row (78.6 long) runs ~4.8× faster than its no-diff floor (16.3) — drafter alive and accepting — and edges out per-tensor fp8 (65.3) on long-form throughput. tool-eval-bench 70/100 is within noise of fp8 (74), though note fp8-row carries one extra safety-critical failure (5 vs fp8's 4 — TC-58, the API-key-leak near-tie that flips across schemes; see the per-scheme table in `quantization.md`). Memory matches fp8 at 1.8×.
+Diffusion fp8-row (78.6 long) runs ~4.8× faster than its no-diff floor (16.3) — drafter alive and accepting — and edges out per-tensor fp8 (65.3) on long-form throughput. tool-eval-bench 70/100 is within noise of fp8 (74), though note fp8-row carries one extra safety-critical failure (5 vs fp8's 4 — TC-58, the API-key-leak near-tie that flips across schemes; see the per-scheme table in `QUANTIZATION.md`). Memory matches fp8 at 1.8×.
 
 So per-row is a fully viable scheme; `fp8` stays the recommended default only on a marginal accuracy preference (74 vs 70, inside the bench's noise floor).
 
@@ -165,7 +165,7 @@ When benchmarking any diffusion arm, confirm `"diffusion": true` in the server's
 1. **No-diff Orthrus is indistinguishable from base Qwen3, at both bf16 and fp8.** At bf16 both arms score 70/138 (final score 70) with identical median turn time (4.4 s). At fp8 both arms are bit-identical scenario-by-scenario (both 102/138 = 74/100, 0 differences across 69 scenarios; final score 74). Same code path through the same weights at the same precision; greedy decoding gives the same output. The `914faee` AR-fallback fix makes `use_diffusion_mode=False` real AR + KV cache, equivalent to stock Qwen3.
 2. **Diffusion is ~2.2× faster per turn than either AR config across both precisions.** Median turn 2.0 s vs 4.4 s at bf16, 1.7 s vs 3.8-3.9 s at fp8. The diffusion speedup carries through quantisation without weakening.
 3. **At fp8, all three arms converge to identical 74/100 (102/138 points).** Direct empirical confirmation of [orthrus-bench-spark PR 4](../orthrus-bench-spark/RESEARCH_LOG.md#vanilla-qwen3-quantization-sensitivity-orthrus-is-not-uniquely-fragile-to-int8): Orthrus inherits Qwen3's quantisation sensitivity, no unique amplification from the diffusion consensus mechanism. Same 4 safety-critical failures in all three arms (TC-31, TC-34, TC-42, TC-43). See `benchmarks/results/tool-eval-bench/` for per-scenario data.
-4. **The drafter survives every calibration-free PTQ scheme tested — granularity is irrelevant.** Per-tensor (`fp8`), per-row (`fp8-row`), and per-block (`nvfp4`) all keep the diffusion arm running 3-5× above the AR floor (long-prompt: fp8 65.3, fp8-row 78.6, nvfp4 88.9 tok/s; AR floor ~14-16). tool-eval-bench clusters at 70-74 across all four arms (within noise). Scheme choice is a memory/throughput/accuracy trade-off, not a drafter-survival question: `fp8` is the recommended default (best accuracy), `nvfp4` the alternative for memory/throughput priority, `fp8-row` viable and fastest on 8-bit long-form throughput. Single-side quantisation (teacher-only / drafter-only probes) buys nothing over quantising the whole model. Full detail in `quantization.md`.
+4. **The drafter survives every calibration-free PTQ scheme tested — granularity is irrelevant.** Per-tensor (`fp8`), per-row (`fp8-row`), and per-block (`nvfp4`) all keep the diffusion arm running 3-5× above the AR floor (long-prompt: fp8 65.3, fp8-row 78.6, nvfp4 88.9 tok/s; AR floor ~14-16). tool-eval-bench clusters at 70-74 across all four arms (within noise). Scheme choice is a memory/throughput/accuracy trade-off, not a drafter-survival question: `fp8` is the recommended default (best accuracy), `nvfp4` the alternative for memory/throughput priority, `fp8-row` viable and fastest on 8-bit long-form throughput. Single-side quantisation (teacher-only / drafter-only probes) buys nothing over quantising the whole model. Full detail in `QUANTIZATION.md`.
 
 ### Reproducing
 

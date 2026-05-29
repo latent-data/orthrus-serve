@@ -18,7 +18,7 @@ Full per-scenario / per-category outputs from the tool-eval-bench sweeps cited i
 
 Note: the two Orthrus fp8 runs (diffusion and no-diff) share the same `Model (API)` field of `orthrus-qwen3-8b-fp8` because `served_model_id` includes the quant suffix but not the diffusion-mode flag. They're distinguished here by the median-turn-time and wall-clock columns above and (in the .md files themselves) by the `Run ID` timestamp.
 
-All four Orthrus diffusion arms (bf16 72, fp8 74, fp8-row 70, nvfp4 71) cluster within a few points, and all run at diffusion-mode median turn times (1.4-2.0 s) — the drafter is active under every quantisation scheme tested. fp8-row matches fp8 on memory (1.8x) and is the fastest 8-bit scheme on long-form throughput; see `quantization.md` and `RESEARCH_LOG.md`.
+All four Orthrus diffusion arms (bf16 72, fp8 74, fp8-row 70, nvfp4 71) cluster within a few points, and all run at diffusion-mode median turn times (1.4-2.0 s) — the drafter is active under every quantisation scheme tested. fp8-row matches fp8 on memory (1.8x) and is the fastest 8-bit scheme on long-form throughput; see `QUANTIZATION.md` and `RESEARCH_LOG.md`.
 
 ## Source
 

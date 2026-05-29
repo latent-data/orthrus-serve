@@ -8,7 +8,7 @@ Target hardware: single NVIDIA DGX Spark (GB10, sm_121, 128 GB unified memory) r
 
 Orthrus is a diffusion-mode language model: it generates a block of candidate tokens per forward pass with a small "drafter" head and verifies them in parallel against the autoregressive (AR) teacher. This server wraps it in an OpenAI-compatible API so it can be evaluated alongside vLLM, LiteLLM, and llama.cpp endpoints with no benchmark-side code changes. The reference parity endpoint is a vanilla `Qwen3-8B` served via llama.cpp on the same machine.
 
-For the full empirical investigation (tool-eval-bench scores, long-form throughput, the cross-scheme comparison), see [RESEARCH_LOG.md](RESEARCH_LOG.md). For the implementation of each quantisation scheme, see [quantization.md](quantization.md).
+For the full empirical investigation (tool-eval-bench scores, long-form throughput, the cross-scheme comparison), see [RESEARCH_LOG.md](RESEARCH_LOG.md). For the implementation of each quantisation scheme, see [QUANTIZATION.md](QUANTIZATION.md).
 
 ## Headline numbers
 
@@ -65,7 +65,7 @@ Environment variables (defaults are baked into the Dockerfile):
 | `ORTHRUS_DEBUG` | `0` | Set to `1` for verbose JSON debug logs |
 | `ORTHRUS_BASE_MODEL` | `0` | Set to `1` to load Qwen3-8B instead of Orthrus |
 | `ORTHRUS_ENABLE_THINKING` | unset | Set to `true` or `false` to override the model default |
-| `ORTHRUS_QUANT` | unset | One of `fp8` / `nvfp4` / `fp8-row` / `fp8-weight-only`. See [quantization.md](quantization.md). Unset = bf16. |
+| `ORTHRUS_QUANT` | unset | One of `fp8` / `nvfp4` / `fp8-row` / `fp8-weight-only`. See [QUANTIZATION.md](QUANTIZATION.md). Unset = bf16. |
 
 ## Endpoints
 
@@ -93,7 +93,7 @@ bash scripts/smoke_test.sh
 # BASE_URL=http://localhost:8080 bash scripts/smoke_test.sh
 ```
 
-Verifies the OpenAI-compatible HTTP surface. Does not verify quantisation correctness — for that, use the dedicated `python -m orthrus_serve.quantization --smoke --scheme <X>` CLI documented in [quantization.md](quantization.md).
+Verifies the OpenAI-compatible HTTP surface. Does not verify quantisation correctness — for that, use the dedicated `python -m orthrus_serve.quantization --smoke --scheme <X>` CLI documented in [QUANTIZATION.md](QUANTIZATION.md).
 
 ## Unit tests
 

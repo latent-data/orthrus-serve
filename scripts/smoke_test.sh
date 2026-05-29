@@ -4,7 +4,7 @@
 # Verifies the HTTP surface (OpenAI-compatible API behaves as expected).
 # Does NOT verify quantisation is active / firing correctly -- for that, use
 # the dedicated `python -m orthrus_serve.quantization --smoke --scheme <X>`
-# CLI documented in quantization.md.
+# CLI documented in QUANTIZATION.md.
 #
 # By default MODEL_ID is auto-derived from /v1/models, so this script works
 # against any precision (orthrus-qwen3-8b, -fp8, -nvfp4, -fp8-row, etc.)
