@@ -106,8 +106,9 @@ HTTP throughput (`benchmarks/results/results_http.json`):
 | Orthrus diffusion bf16 | 38.8 | 51.1 |
 | Orthrus diffusion fp8 | 43.5 | 65.3 |
 | **Orthrus diffusion nvfp4** | **47.3** | **88.9** |
+| Orthrus no-diff nvfp4 | 22.7 | 22.1 |
 
-Long-prompt: NVFP4 is **+36% over fp8** and **+74% over bf16**. The diffusion drafter accept rate stays high enough that output is the same kind of code-completion long-form text as fp8/bf16, not the AR-fallback signature we see at fp8-row.
+Long-prompt: NVFP4 is **+36% over fp8** and **+74% over bf16**. The diffusion drafter accept rate stays high enough that output is the same kind of code-completion long-form text as fp8/bf16, not the AR-fallback signature we see at fp8-row. The no-diff nvfp4 row (benched 2026-05-29) gives a measured long-prompt drafter speedup of **88.9 / 22.1 = 4.0×** — the smallest of the four schemes only because 4-bit weights also speed up the AR floor (22.1 tok/s vs fp8's 16.3, bf16's 10.9), not because the drafter weakens. Short-prompt no-diff is 22.7 tok/s, so the short drafter ratio is just 2.1× (short generation is dominated by per-request and bootstrap overhead, same pattern as every other scheme).
 
 tool-eval-bench (`benchmarks/results/tool-eval-bench/2026-05-27T15-48-11Z_9716ca.md` and `2026-05-27T15-59-16Z_9716ca.md`):
 
@@ -127,7 +128,7 @@ Memory: 18.5 GB bf16 → 10.4 GB fp8 → **6.4 GB nvfp4**. Enough headroom to ei
 | Scheme | Granularity | Drafter speedup (diffusion long / nodiff long) |
 |---|---|---:|
 | fp8 | per-tensor (1 scale / Linear) | 4.7× (65.3 / 14.0) |
-| nvfp4 | per-block (~16 elements) | drafter intact (1.4 s median turn; no-diff HTTP not benched) |
+| nvfp4 | per-block (~16 elements) | 4.0× (88.9 / 22.1) |
 | fp8-row | per-row (1 scale / output channel) | **4.8× (78.6 / 16.3)** |
 
 Per-tensor, per-block, and per-row all keep the drafter accepting at high rates — the diffusion arm runs 3-5× faster than the AR floor in every case. There is no "uniform vs structured" sensitivity: calibration-free PTQ does not perturb the drafter↔teacher alignment for this model, regardless of weight-scale granularity or bit width.
@@ -222,7 +223,7 @@ Measured median turn time on tool-eval-bench (sm_121). The baseline is bf16 no-d
 | fp8-row (per-row) | 8 | 1 scale / output channel | 1.9 s | **2.32×** | intact |
 | nvfp4 (per-block) | 4 | 1 scale / ~16-elem block | 1.4 s | **3.14×** | intact |
 
-The "Total speedup" column is the end-to-end win of each configuration over the dumb baseline (a vanilla single-token AR serving stack, here bf16 no-diff). It stacks the diffusion drafter's speedup and the quant's matmul speedup together. **bf16-diffusion alone gives 2.20×** (the "free" win of choosing Orthrus over vanilla AR); fp8 takes it to 2.59×, nvfp4 to 3.14×. The drafter is the load-bearing piece, and it survives every quantisation scheme — the diffusion arm runs 3-5× above the AR floor under bf16, fp8, fp8-row, and nvfp4 alike (HTTP long-prompt diffusion/nodiff ratios: bf16 4.7×, fp8 4.7×, fp8-row 4.8×).
+The "Total speedup" column is the end-to-end win of each configuration over the dumb baseline (a vanilla single-token AR serving stack, here bf16 no-diff). It stacks the diffusion drafter's speedup and the quant's matmul speedup together. **bf16-diffusion alone gives 2.20×** (the "free" win of choosing Orthrus over vanilla AR); fp8 takes it to 2.59×, nvfp4 to 3.14×. The drafter is the load-bearing piece, and it survives every quantisation scheme — the diffusion arm runs 4-5× above the AR floor under bf16, fp8, fp8-row, and nvfp4 alike (HTTP long-prompt diffusion/nodiff ratios: bf16 4.7×, fp8 4.7×, fp8-row 4.8×, nvfp4 4.0×).
 
 The general finding: **calibration-free PTQ does not disrupt the diffusion drafter for this model, at any weight-scale granularity (per-tensor, per-row, per-block) or bit width (8-bit, 4-bit) tested.** Bit width is the main accuracy lever (4-bit nvfp4 costs ~3 tool-eval-bench points vs 8-bit fp8), and granularity/format mostly affects kernel throughput, not drafter survival.
 
