@@ -1,7 +1,7 @@
 {
   "labels": {
     "orthrus_diffusion": {
-      "timestamp_utc": "2026-05-25T09:16:13.610585+00:00",
+      "timestamp_utc": "2026-05-30T16:52:07.511677+00:00",
       "base_url": "http://localhost:8080",
       "model": "orthrus-qwen3-8b",
       "label": "orthrus_diffusion",
@@ -19,15 +19,15 @@
         "short": {
           "prompt_tokens": 31,
           "tokens": 472,
-          "elapsed": 12.169,
-          "tps": 38.79,
+          "elapsed": 11.873,
+          "tps": 39.75,
           "snippet": "Sure! Below is a Python program that counts the frequency of each word in a given paragraph. This program uses Python's built-in `collections.Counter` for efficient counting.  ### \u2705 Python Program to Count Word Frequency in a Paragraph  ```python from collections import Counter import string  def co"
         },
         "long": {
           "prompt_tokens": 203,
           "tokens": 1441,
-          "elapsed": 28.194,
-          "tps": 51.11,
+          "elapsed": 27.335,
+          "tps": 52.72,
           "snippet": "Here's a complete implementation of the `BoundedPriorityQueue` class using a binary heap, along with a comprehensive `unittest.TestCase` that covers all the required functionality.  ---  ### \u2705 **BoundedPriorityQueue Implementation**  ```python from typing import Generic, List, Tuple, TypeVar, Option"
         }
       }
@@ -97,9 +97,9 @@
       }
     },
     "orthrus_diffusion_fp8": {
-      "timestamp_utc": "2026-05-27T10:15:50.316197+00:00",
+      "timestamp_utc": "2026-05-30T16:55:07.139947+00:00",
       "base_url": "http://localhost:8080",
-      "model": "orthrus-qwen3-8b",
+      "model": "orthrus-qwen3-8b-fp8",
       "label": "orthrus_diffusion_fp8",
       "config": {
         "max_new_tokens": 2048,
@@ -115,15 +115,15 @@
         "short": {
           "prompt_tokens": 31,
           "tokens": 319,
-          "elapsed": 7.332,
-          "tps": 43.51,
+          "elapsed": 7.191,
+          "tps": 44.36,
           "snippet": "Sure! Here's a Python program that counts the frequency of each word in a paragraph:  ```python import re from collections import Counter  def count_word_frequency(paragraph):     # Convert paragraph to lowercase and remove punctuation     paragraph = paragraph.lower()     words = re.findall(r'\\b\\w+"
         },
         "long": {
           "prompt_tokens": 203,
           "tokens": 1425,
-          "elapsed": 21.821,
-          "tps": 65.3,
+          "elapsed": 20.903,
+          "tps": 68.17,
           "snippet": "Here's a complete implementation of the `BoundedPriorityQueue` class using a binary heap, along with a comprehensive `unittest.TestCase` to test all the required functionality.  ---  ### \u2705 **Implementation of `BoundedPriorityQueue`**  ```python from typing import Generic, List, Tuple, TypeVar, Optio"
         }
       }
@@ -193,9 +193,9 @@
       }
     },
     "orthrus_diffusion_fp8_row": {
-      "timestamp_utc": "2026-05-28T08:38:10.331783+00:00",
+      "timestamp_utc": "2026-05-30T16:57:55.323520+00:00",
       "base_url": "http://localhost:8080",
-      "model": "orthrus-qwen3-8b",
+      "model": "orthrus-qwen3-8b-fp8-row",
       "label": "orthrus_diffusion_fp8_row",
       "config": {
         "max_new_tokens": 2048,
@@ -211,15 +211,15 @@
         "short": {
           "prompt_tokens": 31,
           "tokens": 453,
-          "elapsed": 9.528,
-          "tps": 47.54,
+          "elapsed": 9.313,
+          "tps": 48.64,
           "snippet": "Sure! Below is a Python program that counts the frequency of each word in a paragraph. This program uses Python's built-in `collections.Counter` for efficient counting.  ### \u2705 Python Program to Count Word Frequency in a Paragraph  ```python from collections import Counter import string  def count_wo"
         },
         "long": {
           "prompt_tokens": 203,
           "tokens": 1399,
-          "elapsed": 17.801,
-          "tps": 78.59,
+          "elapsed": 17.427,
+          "tps": 80.28,
           "snippet": "Here's a complete implementation of the `BoundedPriorityQueue` class using a binary heap, along with a comprehensive `unittest.TestCase` to test all the required functionality.  ---  ### \u2705 **BoundedPriorityQueue Implementation**  ```python from typing import Generic, TypeVar, List, Tuple, Optional, "
         }
       }
@@ -257,7 +257,7 @@
       }
     },
     "orthrus_diffusion_nvfp4": {
-      "timestamp_utc": "2026-05-27T15:43:10.542344+00:00",
+      "timestamp_utc": "2026-05-30T17:00:35.852353+00:00",
       "base_url": "http://localhost:8080",
       "model": "orthrus-qwen3-8b-nvfp4",
       "label": "orthrus_diffusion_nvfp4",
@@ -275,15 +275,15 @@
         "short": {
           "prompt_tokens": 31,
           "tokens": 329,
-          "elapsed": 6.952,
-          "tps": 47.32,
+          "elapsed": 6.903,
+          "tps": 47.66,
           "snippet": "Here's a Python program that counts the frequency of each word in a paragraph:  ```python import re from collections import Counter  def count_word_frequency(paragraph):     # Convert paragraph to lowercase and remove punctuation     words = re.findall(r'\\b\\w+\\b', paragraph.lower())          # Count"
         },
         "long": {
           "prompt_tokens": 203,
           "tokens": 1419,
-          "elapsed": 15.97,
-          "tps": 88.86,
+          "elapsed": 15.75,
+          "tps": 90.09,
           "snippet": "Here's a complete implementation of the `BoundedPriorityQueue` class using a binary heap, along with a comprehensive `unittest.TestCase` that covers all the required functionality.  ---  ### \u2705 **BoundedPriorityQueue Class**  ```python from typing import Generic, TypeVar, List, Optional, Iterator, Un"
         }
       }
@@ -353,7 +353,7 @@
       }
     },
     "orthrus_nodiff_nvfp4": {
-      "timestamp_utc": "2026-05-29T12:31:35.988939+00:00",
+      "timestamp_utc": "2026-05-30T17:04:21.050027+00:00",
       "base_url": "http://localhost:8080",
       "model": "orthrus-qwen3-8b-nvfp4",
       "label": "orthrus_nodiff_nvfp4",
@@ -371,15 +371,15 @@
         "short": {
           "prompt_tokens": 31,
           "tokens": 298,
-          "elapsed": 13.1,
+          "elapsed": 13.098,
           "tps": 22.75,
           "snippet": "Here's a Python program that counts the frequency of each word in a given paragraph:  ```python import re from collections import Counter  def count_word_frequency(paragraph):     # Convert paragraph to lowercase and remove punctuation     paragraph = paragraph.lower()          # Use regex to find a"
         },
         "long": {
           "prompt_tokens": 203,
           "tokens": 1519,
-          "elapsed": 68.621,
-          "tps": 22.14,
+          "elapsed": 68.43,
+          "tps": 22.2,
           "snippet": "Here's a complete implementation of the `BoundedPriorityQueue` class using a binary heap, along with a comprehensive `unittest.TestCase` that covers all the required functionality.  ---  ### \u2705 **BoundedPriorityQueue Implementation**  ```python from typing import Generic, TypeVar, List, Iterator, Opt"
         }
       }

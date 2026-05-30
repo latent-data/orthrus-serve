@@ -123,15 +123,26 @@ The no-diff row enables the drafter-speedup comparison: median turn 2.6s nodiff 
 
 Memory: 18.5 GB bf16 → 10.4 GB fp8 → **6.4 GB nvfp4**. Enough headroom to either run two NVFP4 instances on a single 128 GB Spark, or to push context length significantly beyond the 40k default with one instance plus its KV cache.
 
-**The drafter survives every quantisation scheme tested** — granularity does not matter:
+**The drafter survives every quantisation scheme tested** — granularity does not matter. Re-benched 2026-05-30 with the tokens-per-forward (TPF) instrumentation described in [§ Tokens-per-forward](#tokens-per-forward-drafter-accept-rate-measured-directly) below; long-prompt HTTP:
 
-| Scheme | Granularity | Drafter speedup (diffusion long / nodiff long) |
-|---|---|---:|
-| fp8 | per-tensor (1 scale / Linear) | 4.7× (65.3 / 14.0) |
-| nvfp4 | per-block (~16 elements) | 4.0× (88.9 / 22.1) |
-| fp8-row | per-row (1 scale / output channel) | **4.8× (78.6 / 16.3)** |
+| Scheme | Granularity | diffusion tok/s | TPF | drafter speedup vs AR floor |
+|---|---|---:|---:|---:|
+| bf16 | n/a | 52.7 | 4.35 | 4.8× (52.7 / 10.9) |
+| fp8 | per-tensor (1 scale / Linear) | 68.2 | 4.28 | 4.9× (68.2 / 14.0) |
+| fp8-row | per-row (1 scale / output channel) | 80.3 | **5.20** | 4.9× (80.3 / 16.3) |
+| nvfp4 | per-block (~16 elements) | 90.1 | 4.19 | 4.1× (90.1 / 22.2) |
 
-Per-tensor, per-block, and per-row all keep the drafter accepting at high rates — the diffusion arm runs 3-5× faster than the AR floor in every case. There is no "uniform vs structured" sensitivity: calibration-free PTQ does not perturb the drafter↔teacher alignment for this model, regardless of weight-scale granularity or bit width.
+Per-tensor, per-block, and per-row all keep the drafter accepting at high rates — TPF ≥ 4 and the diffusion arm runs 4-5× faster than the AR floor in every case. There is no "uniform vs structured" sensitivity: calibration-free PTQ does not perturb the drafter↔teacher alignment for this model, regardless of weight-scale granularity or bit width. fp8-row achieves the highest TPF (5.20), consistent with it being the fastest 8-bit long-form throughput scheme.
+
+### Tokens-per-forward: drafter accept rate, measured directly
+
+The throughput ratios above (diffusion long-prompt / no-diff long-prompt) are an *inference* about drafter health — if the drafter has stopped accepting, diffusion mode degrades to AR speed. A more direct measure is tokens-per-forward (TPF): for each request, divide `completion_tokens` by the number of `model.forward` calls during generation. AR is TPF ≈ 1.0 by definition (one new token per forward); diffusion is whatever block-size × accept-rate the drafter delivers. Wired in via a forward pre-hook in `generation.py` (2026-05-30); each per-request INFO log line now carries `tpf` and `forward_count`.
+
+Sanity rail: nvfp4 **no-diff** long-prompt reads `tpf=1.00` exactly (forward_count == completion_tokens, 1519 of each). The wrong-flag bug that triggered the entire fp8-row correction (see commit [`b50161f`](../../commit/b50161f) and the [LinkedIn write-up](https://www.linkedin.com/posts/simon-w-epstein_almost-jumped-the-gun-on-a-benchmarking-result-activity-7466114410869080065-dwl-)) would have read `tpf ≈ 1.0` on a diffusion-labelled run; the correct value is now > 4 in every diffusion arm. The instrumentation gives a shouting-loud signal for that failure mode that doesn't require comparing against a known-good throughput baseline — directly addressing the lesson of "audit the harness before you believe the result."
+
+Note: AR floors for bf16/fp8/fp8-row in the survival table are carried over from earlier runs (10.9, 14.0, 16.3 tok/s); AR mode is definitionally TPF = 1.0 so re-running them would only re-confirm a fixed value. Only nvfp4 no-diff was re-run as the instrumentation sanity rail.
+
+**Comparison to the Orthrus paper** ([Table 1, arxiv 2605.12825v2](https://arxiv.org/html/2605.12825v2)). The paper reports per-task TPF for Qwen3-8B at T=0: HumanEval 3.94, MBPP 3.95, LiveCodeBench-v5 5.17, Pseudo2code 7.51, four math/reasoning tasks 5.25-6.35, 8-task average 5.39. The TPF convention matches ours (paper caption: "AR baseline operates at TPF = 1.0", which only holds if every model forward is counted, same as our pre-hook). Our bf16 long-prompt **4.35** lands squarely in the paper's code-generation range — above HumanEval/MBPP (~3.94-3.95), below LiveCodeBench (5.17) and Pseudo2code (7.51) — which is the right shape: our long prompt is a code-completion task with tests. Our short 3.26 dips below the code range because prefill and drafter bootstrap amortise less over a ~470-token output than a ~1400-token one. Our four diffusion schemes (4.19-5.20) cluster in a 1.24× band — narrower than the paper's task-to-task code spread (3.94 to 7.51 = 1.9×) — i.e. **quantisation moves TPF less than prompt choice does**. For a tighter parity claim, the right follow-up would be a small HumanEval/MBPP sub-bench rather than two hand-authored prompts; not urgent given the current numbers already fall inside the paper's variance.
 
 **When to use NVFP4**:
 - Memory pressure (running two instances, longer contexts, larger models on smaller hardware in future)

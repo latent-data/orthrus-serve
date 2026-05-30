@@ -36,7 +36,12 @@ def _stub_tokenizer():
 def _result(text: str, prompt_tokens: int = 100, completion_tokens: int | None = None):
     if completion_tokens is None:
         completion_tokens = max(1, len(text.split()))
-    return GenerationResult(text=text, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens)
+    return GenerationResult(
+        text=text,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        forward_count=max(1, completion_tokens),
+    )
 
 
 @pytest.fixture

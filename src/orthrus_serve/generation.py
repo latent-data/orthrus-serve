@@ -17,6 +17,12 @@ class GenerationResult:
     text: str
     prompt_tokens: int
     completion_tokens: int
+    # Number of times model.forward was called during generate(). In AR mode this
+    # is ~completion_tokens (1 prefill + 1 per new token); in diffusion mode the
+    # drafter proposes a block per forward, so completion_tokens / forward_count
+    # = tokens-per-forward (TPF) is a direct measure of drafter accept rate. A
+    # diffusion-labelled run with TPF ≈ 1.0 means the drafter isn't firing.
+    forward_count: int
 
 
 class StringStoppingCriteria(StoppingCriteria):
@@ -68,8 +74,18 @@ def generate(
     loggable = {k: v for k, v in generate_kwargs.items() if k != "stopping_criteria"}
     logger.debug("generate_kwargs %s", loggable)
 
-    with torch.inference_mode():
-        output_ids = model.generate(input_ids=input_ids, **generate_kwargs)
+    forward_count = 0
+
+    def _count_forward(_module, _args, _kwargs):
+        nonlocal forward_count
+        forward_count += 1
+
+    hook = model.register_forward_pre_hook(_count_forward, with_kwargs=True)
+    try:
+        with torch.inference_mode():
+            output_ids = model.generate(input_ids=input_ids, **generate_kwargs)
+    finally:
+        hook.remove()
 
     # Slice off the prompt tokens; decode only the completion
     new_ids = output_ids[0][prompt_len:]
@@ -87,4 +103,5 @@ def generate(
         text=text,
         prompt_tokens=prompt_len,
         completion_tokens=len(new_ids),
+        forward_count=forward_count,
     )

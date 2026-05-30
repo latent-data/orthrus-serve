@@ -102,7 +102,7 @@ def summarize(reqs: list[dict]) -> None:
 
     # Accept either the new "generate_s" or the historical "ttft_s" field name
     # so old logs still parse cleanly.
-    for field in ("completion_tokens", "prompt_tokens", "generate_s", "ttft_s", "total_s", "tok_per_s"):
+    for field in ("completion_tokens", "prompt_tokens", "forward_count", "generate_s", "ttft_s", "total_s", "tok_per_s", "tpf"):
         vals = [float(r[field]) for r in reqs if field in r]
         if vals:
             _print_stats(field, vals)

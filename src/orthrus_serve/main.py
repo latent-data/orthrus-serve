@@ -137,15 +137,18 @@ def _postprocess(result, request_id, t_generate, t_total):
     GENERATE_DURATION_HIST.observe(t_generate)
 
     tok_per_s = round(result.completion_tokens / t_generate, 2) if t_generate > 0 else 0.0
+    tpf = round(result.completion_tokens / result.forward_count, 2) if result.forward_count > 0 else 0.0
     logger.info(
         json.dumps(
             {
                 "request_id": request_id,
                 "prompt_tokens": result.prompt_tokens,
                 "completion_tokens": result.completion_tokens,
+                "forward_count": result.forward_count,
                 "generate_s": round(t_generate, 3),
                 "total_s": round(t_total, 3),
                 "tok_per_s": tok_per_s,
+                "tpf": tpf,
                 "tool_calls": bool(tool_calls_out),
                 "finish_reason": finish_reason,
             }

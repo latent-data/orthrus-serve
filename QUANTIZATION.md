@@ -157,14 +157,16 @@ Every calibration-free post-training quantisation scheme we have measured — `f
 
 HTTP throughput (`benchmarks/results/results_http.json`), diffusion-mode long prompt vs the no-diffusion (AR) floor at the same precision:
 
-| Scheme | diffusion short | diffusion long | no-diff long | drafter speedup (long) |
+| Scheme | diffusion long tok/s | TPF | no-diff long tok/s | drafter speedup (long) |
 |---|---:|---:|---:|---:|
-| bf16 | 38.8 | 51.1 | 10.9 | 4.7× |
-| fp8 (per-tensor) | 43.5 | 65.3 | 14.0 | 4.7× |
-| **fp8-row (per-row)** | **47.5** | **78.6** | 16.3 | **4.8×** |
-| nvfp4 (per-block) | 47.3 | 88.9 | — | drafter intact (1.4 s median turn) |
+| bf16 | 52.7 | 4.35 | 10.9 | 4.8× |
+| fp8 (per-tensor) | 68.2 | 4.28 | 14.0 | 4.9× |
+| **fp8-row (per-row)** | **80.3** | **5.20** | 16.3 | **4.9×** |
+| nvfp4 (per-block) | 90.1 | 4.19 | 22.2 | 4.1× |
 
-The diffusion arm runs **3-5× faster than the AR floor under every scheme** — the unambiguous signature of an active drafter. Per-row is in fact the fastest 8-bit scheme on long-form generation (78.6 tok/s, above per-tensor fp8's 65.3), because its kernel path and accept rate are both healthy on sm_121.
+(Refreshed 2026-05-30 with the new TPF instrumentation in `generation.py`; TPF = `completion_tokens / model.forward_count`, counted via a forward pre-hook. See `RESEARCH_LOG.md` § Tokens-per-forward for derivation and the no-diff sanity row at TPF = 1.00.)
+
+The diffusion arm runs **4-5× faster than the AR floor under every scheme** and posts TPF ≥ 4 — both unambiguous signatures of an active drafter. Per-row is the fastest 8-bit scheme on long-form generation (80.3 tok/s, above per-tensor fp8's 68.2) and also posts the highest TPF (5.20), because both its kernel path and its accept rate are healthy on sm_121.
 
 tool-eval-bench accuracy (diffusion mode) clusters tightly across all schemes:
 
